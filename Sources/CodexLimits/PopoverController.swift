@@ -42,15 +42,30 @@ final class PopoverController: NSViewController {
         settings.setAccessibilityLabel("Settings")
         let header = UI.stack([UI.label("◈ Codex Limits", size: 15, weight: .semibold), UI.spacer(), refresh, settings], vertical: false)
         header.widthAnchor.constraint(equalToConstant: 312).isActive = true
-        let content = UI.stack([UI.label("\(monitor.connectedCount) accounts connected", size: 11, color: .secondaryLabelColor), UI.divider()], spacing: 10)
+        var summary = monitor.settings.accounts.isEmpty ? "No Codex accounts" : "\(monitor.connectedCount) of \(monitor.settings.accounts.count) Codex accounts connected"
+        if monitor.settings.commandCode.enabled {
+            if monitor.commandCodeConnected {
+                summary += " · Command Code connected"
+            } else if monitor.commandCode.notConnected || !monitor.settings.commandCode.hasCredential {
+                summary += " · Command Code not connected"
+            } else if monitor.commandCode.error != nil {
+                summary += " · Command Code needs attention"
+            } else {
+                summary += " · Command Code checking"
+            }
+        }
+        let content = UI.stack([UI.label(summary, size: 11, color: .secondaryLabelColor), UI.divider()], spacing: 10)
         if monitor.settings.accounts.isEmpty {
-            content.addArrangedSubview(UI.label("No accounts configured. Use Settings → Add Account.", color: .secondaryLabelColor))
+            content.addArrangedSubview(UI.label("No Codex accounts configured. Use Settings → Add Account.", color: .secondaryLabelColor))
         }
         for configuration in monitor.settings.accounts {
-            content.addArrangedSubview(AccountView(configuration: configuration, state: monitor.states[configuration.slot]!, expanded: expanded.contains(configuration.slot), canRedeem: !monitor.isBusy && !monitor.isOffline, toggleTarget: self, toggleAction: #selector(toggleResets(_:)), redeemAction: #selector(applyReset(_:)), autoAction: #selector(toggleAuto(_:))))
+            content.addArrangedSubview(AccountView(configuration: configuration, state: monitor.states[configuration.slot]!, expanded: expanded.contains(configuration.slot), canRedeem: !monitor.isBusy && !monitor.isOffline, toggleTarget: self, toggleAction: #selector(toggleResets(_:)), redeemAction: #selector(applyReset(_:))))
             content.addArrangedSubview(UI.divider())
         }
-        let last = monitor.states.values.compactMap { $0.snapshot?.fetchedAt }.min()
+        if monitor.settings.commandCode.enabled {
+            content.addArrangedSubview(CommandCodeView(configuration: monitor.settings.commandCode, state: monitor.commandCode, target: self, openAction: #selector(openCommandCode)))
+        }
+        let last = (monitor.states.values.compactMap { $0.snapshot?.fetchedAt } + [monitor.commandCode.snapshot?.fetchedAt].compactMap { $0 }).min()
         let footer: String
         if monitor.isOffline { footer = "● Offline · last successful data shown" }
         else if monitor.isRefreshing { footer = "● Updating…" }
@@ -59,7 +74,7 @@ final class PopoverController: NSViewController {
             footer = minutes == 0 ? "● Updated just now" : "● Updated \(minutes)m ago"
         } else { footer = "● Configure accounts in Settings" }
         content.addArrangedSubview(UI.label(footer, size: 10, color: .secondaryLabelColor))
-        let bottom = UI.stack([UI.label("Refresh every \(monitor.settings.refreshMinutes) min", size: 10, color: .secondaryLabelColor), UI.spacer(), UI.button("Open Usage ↗", target: self, action: #selector(openUsage))], vertical: false)
+        let bottom = UI.stack([UI.label("Refresh every \(monitor.settings.refreshMinutes) min", size: 10, color: .secondaryLabelColor), UI.spacer(), UI.button("Codex usage ↗", target: self, action: #selector(openUsage))], vertical: false)
         bottom.widthAnchor.constraint(equalToConstant: 312).isActive = true
         content.addArrangedSubview(bottom)
         for child in content.arrangedSubviews { child.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true }
@@ -116,14 +131,6 @@ final class PopoverController: NSViewController {
     }
     @objc private func refreshNow() { monitor.refresh(manual: true) }
     @objc private func settingsNow() { openSettings?() }
-    @objc private func toggleAuto(_ sender: NSSwitch) {
-        guard let slot = sender.identifier?.rawValue else { return }
-        do { try monitor.setAutoStart(slot: slot, enabled: sender.state == .on) }
-        catch {
-            let alert = NSAlert(); alert.messageText = "Auto-start setting not saved"; alert.informativeText = error.localizedDescription
-            alert.runModal(); render()
-        }
-    }
     @objc private func toggleResets(_ sender: NSButton) {
         guard let slot = sender.identifier?.rawValue else { return }
         if expanded.contains(slot) { expanded.remove(slot) } else { expanded.insert(slot) }
@@ -154,4 +161,5 @@ final class PopoverController: NSViewController {
         }
     }
     @objc private func openUsage() { NSWorkspace.shared.open(URL(string: "https://chatgpt.com/codex/settings/usage")!) }
+    @objc private func openCommandCode() { NSWorkspace.shared.open(URL(string: "https://commandcode.ai/usage")!) }
 }

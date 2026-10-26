@@ -60,32 +60,6 @@ public enum CodexExecutable {
 public final class CodexClient: AccountReading {
     public init() {}
     public static func cancelAll() { ChildProcesses.cancelAll() }
-    public func initializeWindow(account: AccountConfiguration, expected: AccountSnapshot, executable: String) throws -> AutoStartResult {
-        try account.validateDedicatedHome()
-        guard let binary = CodexExecutable.nativePath(executable) else { throw ClientFailure.configuration("Native Codex binary unavailable.") }
-        let lease = try HomeLease(home: account.canonicalHome)
-        return try withExtendedLifetime(lease) {
-            let rpc = try RPCSession(executable: binary, home: account.canonicalHome, timeout: 40)
-            do {
-                try rpc.initialize()
-                let identity = try rpc.readAccount()
-                let usage = try rpc.readUsage()
-                let after = try rpc.readAccount()
-                guard identity.account?.email == expected.email, after.account?.email == expected.email,
-                      identity.account?.type == "chatgpt", after.account?.type == "chatgpt",
-                      expected.usage.accountId != nil, usage.accountId == expected.usage.accountId else {
-                    throw ClientFailure.authentication("Auto-start skipped: account/workspace changed.")
-                }
-                guard WindowInitializer.mayExecute(usage: usage, enabled: account.autoStart) else {
-                    throw ClientFailure.configuration("Auto-start skipped: allowance or credit state changed before execution.")
-                }
-                rpc.close()
-                try AutoStartExecution.run(binary: binary, home: account.canonicalHome)
-            } catch { rpc.close(); throw error }
-            // Same home lease retained until inference ends; then the ordinary reader may acquire it.
-            return AutoStartResult(message: "ok completed · " + DisplayTime.absolute(Date()), snapshot: nil)
-        }
-    }
     public func redeem(selection: ResetSelection, confirmed: Bool, store: ResetAttemptStore, executable: String) throws -> ResetResult? {
         guard confirmed else { return nil }
         try selection.account.validateDedicatedHome()

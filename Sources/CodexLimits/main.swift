@@ -16,6 +16,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         let uiSmokeTest = CommandLine.arguments.contains("--ui-smoke-test") || CommandLine.arguments.contains("--ui-mouse-test")
+        if uiSmokeTest { unsetenv("COMMAND_CODE_API_KEY") }
         let root: URL
         if uiSmokeTest {
             root = FileManager.default.temporaryDirectory.appendingPathComponent("CodexLimits-UI-" + UUID().uuidString)
@@ -28,7 +29,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         let settings: Settings
         do {
             var loaded = try store.load(defaultCodex: CodexExecutable.discover())
-            if uiSmokeTest { for _ in 0..<3 { loaded.addAccount(root: root) } }
+            if uiSmokeTest {
+                for _ in 0..<3 { loaded.addAccount(root: root) }
+                loaded.commandCode = CommandCodeConfiguration(enabled: true, authFile: root.appendingPathComponent("no-command-code-auth.json").path)
+            }
             settings = loaded
         }
         catch {
@@ -63,21 +67,27 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         update()
         if uiSmokeTest { runPopoverSmokeTest(); return }
         monitor.start()
-        if settings.codexPath.isEmpty { showSettings() }
+        if settings.codexPath.isEmpty && !settings.commandCode.enabled { showSettings() }
         if CommandLine.arguments.contains("--show-popover") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.togglePopover() }
         }
     }
     private func update() {
-        let parts = monitor.settings.accounts.map { account -> String in
+        let codexParts = monitor.settings.accounts.map { account -> String in
             let state = monitor.states[account.slot]!
             let number = state.snapshot?.usage.codex?.fiveHour.map { "\($0.remaining)%" } ?? "—"
             return "\(account.slot): \(number)\(state.error == nil ? "" : "!")"
         }
-        let displayed = Array(parts.prefix(3))
-        let overflow = parts.count > 3 ? " · +\(parts.count - 3)" : ""
-        statusItem.button?.title = parts.isEmpty ? "◈ Codex Limits" : "◈ " + displayed.joined(separator: " · ") + overflow
-        statusItem.button?.toolTip = "Codex Limits · remaining 5-hour allowance. ! means stale/error. Click for details."
+        var parts = Array(codexParts.prefix(3))
+        let overflow = codexParts.count > 3 ? " · +\(codexParts.count - 3)" : ""
+        if monitor.settings.commandCode.enabled {
+            let state = monitor.commandCode
+            let number = state.snapshot?.menuBarRemaining.map { "\($0)%" } ?? "—"
+            parts.append("CC: \(number)\(state.error == nil ? "" : "!")")
+        }
+        let title = parts.isEmpty ? "◈ Codex Limits" : "◈ " + parts.joined(separator: " · ") + overflow
+        statusItem.button?.title = title
+        statusItem.button?.toolTip = "Codex Limits · remaining 5-hour allowance; CC is Command Code. ! means stale/error. Click for details."
         statusItem.button?.setAccessibilityLabel("Codex Limits, " + parts.joined(separator: ", "))
         if popover?.isShown == true { controller.render() }
         settingsController?.updateStatus()
@@ -192,9 +202,18 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
                 guard accountViews.count == monitor.settings.accounts.count, accountViews.allSatisfy({ $0.frame.height > 100 }) else {
                     fputs("UI smoke: account content is missing or has collapsed layout\n", stderr); exit(1)
                 }
+                guard let commandCodeView = findViews(in: controller.view).compactMap({ $0 as? CommandCodeView }).first,
+                      commandCodeView.frame.height > 40 else {
+                    fputs("UI smoke: Command Code card is missing or has collapsed layout\n", stderr); exit(1)
+                }
                 if let index = CommandLine.arguments.firstIndex(of: "--ui-snapshot"), CommandLine.arguments.count > index + 1,
                    let image = controller.view.bitmapImageRepForCachingDisplay(in: controller.view.bounds) {
                     controller.view.cacheDisplay(in: controller.view.bounds, to: image)
+                    try? image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+                }
+                if let index = CommandLine.arguments.firstIndex(of: "--ui-command-code-snapshot"), CommandLine.arguments.count > index + 1,
+                   let image = commandCodeView.bitmapImageRepForCachingDisplay(in: commandCodeView.bounds) {
+                    commandCodeView.cacheDisplay(in: commandCodeView.bounds, to: image)
                     try? image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
                 }
                 controller.render() // Exercise the normal refresh/render path while visible.
@@ -208,6 +227,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
                               let content = window.contentView,
                               let add = findViews(in: content).compactMap({ $0 as? NSButton }).first(where: { $0.title == "+ Add Account" }) else {
                             fputs("UI smoke: Settings/Add Account is not visible\n", stderr); exit(1)
+                        }
+                        if let index = CommandLine.arguments.firstIndex(of: "--ui-settings-snapshot"), CommandLine.arguments.count > index + 1,
+                           let image = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                            content.cacheDisplay(in: content.bounds, to: image)
+                            try? image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
                         }
                         add.performClick(nil)
                         let loginButtons = findViews(in: content).compactMap { $0 as? NSButton }.filter { $0.title == "Sign in…" }
@@ -232,7 +256,30 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
 }
 
 // Read-only protocol smoke test; never performs login or inference.
-if CommandLine.arguments.contains("--probe"), let index = CommandLine.arguments.firstIndex(of: "--home"), CommandLine.arguments.count > index + 1 {
+if CommandLine.arguments.contains("--command-code-probe"),
+   let index = CommandLine.arguments.firstIndex(of: "--auth"), CommandLine.arguments.count > index + 1 {
+    let authFile = CommandLine.arguments[index + 1]
+    let semaphore = DispatchSemaphore(value: 0)
+    Task.detached {
+        defer { semaphore.signal() }
+        do {
+            let snapshot = try await CommandCodeClient.shared.read(authFile: authFile)
+            print("Command Code account connected; usage response decoded. Identity not printed.")
+            print("Plan: \(snapshot.planName ?? "unknown")")
+            print("5-hour remaining: \(snapshot.windowLimits?.fiveHour?.remaining.map(String.init) ?? "unavailable")")
+            print("Weekly remaining: \(snapshot.windowLimits?.weekly?.remaining.map(String.init) ?? "unavailable")")
+            print("Monthly remaining: \(snapshot.monthlyRemainingPercent.map(String.init) ?? "unavailable")")
+            exit(0)
+        } catch let failure as CommandCodeFailure {
+            fputs("\(failure.localizedDescription)\n", stderr)
+            exit(failure.isTransient ? 2 : 1)
+        } catch {
+            fputs("\(error.localizedDescription)\n", stderr)
+            exit(1)
+        }
+    }
+    semaphore.wait()
+} else if CommandLine.arguments.contains("--probe"), let index = CommandLine.arguments.firstIndex(of: "--home"), CommandLine.arguments.count > index + 1 {
     let home = CommandLine.arguments[index + 1]
     do {
         let snapshot = try CodexClient().read(account: AccountConfiguration(slot: "A", name: "Probe", home: home), executable: CodexExecutable.discover())

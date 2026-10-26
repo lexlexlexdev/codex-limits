@@ -5,18 +5,15 @@ public struct AccountConfiguration: Codable, Equatable, Sendable {
     public var slot: String
     public var name: String
     public var home: String
-    public var autoStart: Bool
     public init(slot: String, name: String, home: String) {
         self.slot = slot; self.name = name; self.home = home
-        autoStart = false
     }
-    enum CodingKeys: String, CodingKey { case slot, name, home, autoStart }
+    enum CodingKeys: String, CodingKey { case slot, name, home }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         slot = try values.decode(String.self, forKey: .slot)
         name = try values.decode(String.self, forKey: .name)
         home = try values.decode(String.self, forKey: .home)
-        autoStart = try values.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
     }
     public var canonicalHome: String {
         URL(fileURLWithPath: (home as NSString).expandingTildeInPath).standardizedFileURL.resolvingSymlinksInPath().path
@@ -28,14 +25,57 @@ public struct AccountConfiguration: Codable, Equatable, Sendable {
     }
 }
 
+public struct CommandCodeConfiguration: Codable, Equatable, Sendable {
+    public static let defaultAuthFile = "~/.commandcode/auth.json"
+    public var enabled: Bool
+    public var authFile: String
+    public init(enabled: Bool = false, authFile: String = CommandCodeConfiguration.defaultAuthFile) {
+        self.enabled = enabled; self.authFile = authFile
+    }
+    public var expandedAuthFile: String {
+        URL(fileURLWithPath: (authFile as NSString).expandingTildeInPath).standardizedFileURL.path
+    }
+    public static func defaultAuthExists() -> Bool {
+        let path = URL(fileURLWithPath: (defaultAuthFile as NSString).expandingTildeInPath).standardizedFileURL.path
+        return FileManager.default.fileExists(atPath: path)
+    }
+    public var hasCredential: Bool {
+        let token = ProcessInfo.processInfo.environment["COMMAND_CODE_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !token.isEmpty || FileManager.default.fileExists(atPath: expandedAuthFile)
+    }
+    public func validate() throws {
+        guard !authFile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ClientFailure.configuration("Command Code auth.json path cannot be empty.")
+        }
+        guard authFile.hasPrefix("/") || authFile.hasPrefix("~/") else {
+            throw ClientFailure.configuration("Command Code auth.json must use an absolute or ~/ path.")
+        }
+    }
+}
+
 public struct Settings: Codable, Sendable {
     public var accounts: [AccountConfiguration]
     public var codexPath: String
     public var refreshMinutes: Int
+    public var commandCode: CommandCodeConfiguration
     public init(root: URL, codexPath: String) {
-        accounts = [AccountConfiguration(slot: "A", name: "Personal", home: root.appendingPathComponent("Accounts/A").path),
-                    AccountConfiguration(slot: "B", name: "Secondary", home: root.appendingPathComponent("Accounts/B").path)]
+        if codexPath.isEmpty && CommandCodeConfiguration.defaultAuthExists() {
+            accounts = []
+        } else {
+            accounts = [AccountConfiguration(slot: "A", name: "Personal", home: root.appendingPathComponent("Accounts/A").path),
+                        AccountConfiguration(slot: "B", name: "Secondary", home: root.appendingPathComponent("Accounts/B").path)]
+        }
         self.codexPath = codexPath; refreshMinutes = 5
+        commandCode = CommandCodeConfiguration(enabled: CommandCodeConfiguration.defaultAuthExists())
+    }
+    enum CodingKeys: String, CodingKey { case accounts, codexPath, refreshMinutes, commandCode }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        accounts = try values.decode([AccountConfiguration].self, forKey: .accounts)
+        codexPath = try values.decode(String.self, forKey: .codexPath)
+        refreshMinutes = try values.decode(Int.self, forKey: .refreshMinutes)
+        commandCode = try values.decodeIfPresent(CommandCodeConfiguration.self, forKey: .commandCode)
+            ?? CommandCodeConfiguration(enabled: CommandCodeConfiguration.defaultAuthExists())
     }
     public func validate() throws {
         try validateAccountSlots()
@@ -45,9 +85,12 @@ public struct Settings: Codable, Sendable {
             guard !account.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ClientFailure.configuration("Account names cannot be empty.") }
         }
         guard (1...60).contains(refreshMinutes) else { throw ClientFailure.configuration("Refresh interval must be 1–60 minutes.") }
-        guard codexPath.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: codexPath) else {
-            throw ClientFailure.configuration("Select an executable Codex CLI binary.")
+        if !accounts.isEmpty {
+            guard codexPath.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: codexPath) else {
+                throw ClientFailure.configuration("Select an executable Codex CLI binary.")
+            }
         }
+        if commandCode.enabled { try commandCode.validate() }
     }
     public func validateAccountSlots() throws {
         guard Set(accounts.map(\.slot)).count == accounts.count,

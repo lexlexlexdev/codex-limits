@@ -73,7 +73,7 @@ final class ResetButton: NSButton {
 
 @MainActor
 final class AccountView: NSStackView {
-    init(configuration: AccountConfiguration, state: UsageMonitor.State, expanded: Bool, canRedeem: Bool, toggleTarget: AnyObject, toggleAction: Selector, redeemAction: Selector, autoAction: Selector) {
+    init(configuration: AccountConfiguration, state: UsageMonitor.State, expanded: Bool, canRedeem: Bool, toggleTarget: AnyObject, toggleAction: Selector, redeemAction: Selector) {
         super.init(frame: .zero)
         orientation = .vertical; alignment = .leading; spacing = 8
         widthAnchor.constraint(equalToConstant: 312).isActive = true
@@ -156,21 +156,116 @@ final class AccountView: NSStackView {
         } else {
             addArrangedSubview(UI.label("Available resets · unavailable", size: 11, color: .secondaryLabelColor))
         }
-        let toggle = NSSwitch(); toggle.state = configuration.autoStart ? .on : .off; toggle.isEnabled = canRedeem
-        toggle.target = toggleTarget; toggle.action = autoAction
-        toggle.identifier = NSUserInterfaceItemIdentifier(configuration.slot)
-        toggle.toolTip = WindowInitializer.limitation
-        toggle.setAccessibilityLabel("Auto-start window, account " + configuration.slot)
-        let auto = UI.stack([UI.label("Auto-start window", size: 11), UI.spacer(), UI.label("Every 10 min", size: 10, color: .secondaryLabelColor), toggle], vertical: false)
-        auto.widthAnchor.constraint(equalToConstant: 312).isActive = true
-        auto.toolTip = WindowInitializer.limitation
-        addArrangedSubview(auto)
-        if configuration.autoStart, let message = state.autoMessage {
-            let label = UI.label(message, size: 10, color: .secondaryLabelColor)
-            label.preferredMaxLayoutWidth = 312
-            addArrangedSubview(label)
-        }
         for child in arrangedSubviews { child.widthAnchor.constraint(equalTo: widthAnchor).isActive = true }
     }
     required init?(coder: NSCoder) { fatalError() }
+}
+
+@MainActor
+final class CommandCodeView: NSStackView {
+    init(configuration: CommandCodeConfiguration, state: UsageMonitor.CommandCodeState, target: AnyObject, openAction: Selector) {
+        super.init(frame: .zero)
+        orientation = .vertical; alignment = .leading; spacing = 8
+        widthAnchor.constraint(equalToConstant: 312).isActive = true
+        identifier = NSUserInterfaceItemIdentifier("command-code")
+        let stale = state.error != nil
+        let notConnected = state.notConnected || (state.snapshot == nil && state.error == nil && !configuration.hasCredential)
+        let status: String
+        if stale { status = "Needs attention" }
+        else if state.snapshot != nil { status = "Connected" }
+        else if notConnected { status = "Not connected" }
+        else { status = "Checking…" }
+        let snapshot = state.snapshot
+        let header = UI.stack([UI.label("Command Code", size: 13, weight: .semibold), UI.spacer()], vertical: false)
+        if let plan = snapshot?.planName, !plan.isEmpty {
+            header.addArrangedSubview(UI.label(plan, size: 10, color: .secondaryLabelColor))
+        }
+        header.addArrangedSubview(UI.label(status, size: 10, color: stale ? .systemOrange : .secondaryLabelColor))
+        addArrangedSubview(header)
+        if let snapshot {
+            let identity = [snapshot.userName, snapshot.orgLogin.map { "@\($0)" }].compactMap { $0 }.joined(separator: " · ")
+            addArrangedSubview(UI.label(identity, size: 10, color: .secondaryLabelColor))
+            addWindow("Monthly", percent: snapshot.monthlyRemainingPercent)
+            if let end = snapshot.currentPeriodEnd {
+                let days = snapshot.daysUntilRenewal()
+                let renewal = days == 0 ? "Renews today" : "Renews in \(days ?? 0)d"
+                addDetail("\(renewal) · \(DisplayTime.absolute(end))")
+            } else {
+                addDetail("Renewal date unavailable")
+            }
+            if let limits = snapshot.windowLimits, limits.limited {
+                if limits.fiveHour != nil { addWindow("5-hour", percent: limits.fiveHour?.remaining) }
+                if let window = limits.fiveHour { addReset("5h", window) }
+                if limits.weekly != nil { addWindow("Weekly", percent: limits.weekly?.remaining) }
+                if let window = limits.weekly { addReset("Weekly", window) }
+            } else if snapshot.windowLimits != nil {
+                addDetail("No 5-hour or weekly caps on this account")
+            } else {
+                addDetail("Window caps unavailable")
+            }
+            if let credits = snapshot.credits, credits.extraRemaining > 0 {
+                addDetail("Extra credits · " + Self.money(credits.extraRemaining) + " (not capped)")
+            }
+            var periodParts: [String] = []
+            if let cost = snapshot.totalCost, cost > 0 { periodParts.append(Self.money(cost) + " spent") }
+            if let count = snapshot.totalCount, count > 0 { periodParts.append("\(count) requests") }
+            if !periodParts.isEmpty { addDetail(periodParts.joined(separator: " · ")) }
+            for warning in snapshot.warnings {
+                addDetail(warning)
+            }
+        } else {
+            let explanation = notConnected
+                ? "Not signed in. Run `cmd login` in Terminal, then refresh."
+                : state.error ?? "Usage is being checked."
+            let label = UI.label(explanation, size: 10, color: notConnected ? .secondaryLabelColor : .systemOrange)
+            label.preferredMaxLayoutWidth = 312
+            addArrangedSubview(label)
+            addDetail("Uses Command Code’s own auth.json read-only; the key is never saved or logged.")
+        }
+        if let error = state.error, snapshot != nil {
+            let label = UI.label(error + " Last successful data shown.", size: 10, color: .systemOrange)
+            label.preferredMaxLayoutWidth = 312
+            addArrangedSubview(label)
+        }
+        let link = UI.button("Command Code ↗", target: target, action: openAction)
+        link.setAccessibilityLabel("Open Command Code usage")
+        addArrangedSubview(UI.stack([UI.spacer(), link], vertical: false))
+        setAccessibilityLabel("Command Code, \(status)")
+        for child in arrangedSubviews { child.widthAnchor.constraint(equalTo: widthAnchor).isActive = true }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func addWindow(_ title: String, percent: Int?) {
+        let titleView = UI.label(title, size: 11)
+        titleView.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        let number = UI.label(percent.map { "\($0)%" } ?? "—", size: 12, weight: .medium)
+        number.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        let row = UI.stack([titleView, AllowanceBar(remaining: percent), UI.spacer(), number], vertical: false)
+        row.widthAnchor.constraint(equalToConstant: 312).isActive = true
+        addArrangedSubview(row)
+    }
+
+    private func addReset(_ title: String, _ window: CommandCodeWindow) {
+        guard let date = window.resetAt else {
+            addDetail("\(title) reset time unavailable")
+            return
+        }
+        if date <= Date() {
+            addDetail("\(title) window ended · awaiting server update")
+        } else if title == "5h" {
+            addDetail("5h resets in \(DisplayTime.relative(until: date))")
+        } else {
+            addDetail("Weekly resets \(DisplayTime.absolute(date))")
+        }
+    }
+
+    private func addDetail(_ text: String) {
+        let label = UI.label(text, size: 10, color: .secondaryLabelColor)
+        label.preferredMaxLayoutWidth = 312
+        addArrangedSubview(label)
+    }
+
+    private static func money(_ value: Double) -> String {
+        String(format: "$%.2f", value)
+    }
 }

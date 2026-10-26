@@ -11,8 +11,10 @@ final class SettingsController: NSWindowController {
     private let interval = NSTextField()
     private let launch = NSButton(checkboxWithTitle: "Launch at login", target: nil, action: nil)
     private let message = UI.label("", size: 11, color: .systemOrange)
+    private let commandCodeEnabled = NSButton(checkboxWithTitle: "Monitor Command Code", target: nil, action: nil)
+    private let commandCodePath = NSTextField()
+    private let commandCodeStatus = UI.label("", size: 10, color: .secondaryLabelColor)
     private var signInButtons: [NSButton] = []
-    private var autoButtons: [NSButton] = []
     private var layout: NSStackView?
     private var draft: Settings
     private var scroll: NSScrollView?
@@ -30,7 +32,7 @@ final class SettingsController: NSWindowController {
     private func build() {
         guard let window, let container = window.contentView else { return }
         container.subviews.forEach { $0.removeFromSuperview() }
-        names.removeAll(); homes.removeAll(); signInButtons.removeAll(); autoButtons.removeAll()
+        names.removeAll(); homes.removeAll(); signInButtons.removeAll()
         let title = UI.label("Accounts · one dedicated home each", size: 17, weight: .semibold)
         let help = UI.label("Each directory must belong exclusively to this utility. Do not select a home used by Codex CLI, VS Code, or the Codex app: concurrent OAuth refresh can invalidate credentials. No credentials are copied. Save before signing in.", size: 11, color: .secondaryLabelColor)
         help.preferredMaxLayoutWidth = 558
@@ -51,10 +53,6 @@ final class SettingsController: NSWindowController {
             let remove = UI.button("Remove", target: self, action: #selector(removeAccount(_:))); remove.tag = index
             content.addArrangedSubview(UI.stack([UI.label("Account \(account.slot)", weight: .semibold), name, UI.spacer(), login, remove], vertical: false))
             content.addArrangedSubview(UI.stack([home, choose], vertical: false))
-            let auto = NSButton(checkboxWithTitle: "Auto-start at 100% · check every 10 minutes", target: self, action: #selector(changeAuto(_:)))
-            auto.tag = index; auto.state = account.autoStart ? .on : .off
-            auto.toolTip = WindowInitializer.limitation
-            autoButtons.append(auto); content.addArrangedSubview(auto)
         }
         content.addArrangedSubview(UI.divider())
         executable.stringValue = draft.codexPath
@@ -62,15 +60,29 @@ final class SettingsController: NSWindowController {
         executable.widthAnchor.constraint(equalToConstant: 436).isActive = true
         content.addArrangedSubview(UI.label("Native Codex CLI executable", weight: .medium))
         content.addArrangedSubview(UI.stack([executable, UI.button("Choose…", target: self, action: #selector(chooseExecutable))], vertical: false))
+        content.addArrangedSubview(UI.divider())
+        content.addArrangedSubview(UI.label("Command Code (optional)", size: 13, weight: .semibold))
+        commandCodeEnabled.target = self; commandCodeEnabled.action = #selector(toggleCommandCode)
+        commandCodeEnabled.state = draft.commandCode.enabled ? .on : .off
+        commandCodeEnabled.toolTip = "Reads Command Code usage with the login already stored by the Command Code CLI."
+        content.addArrangedSubview(commandCodeEnabled)
+        commandCodePath.stringValue = draft.commandCode.authFile
+        commandCodePath.font = .systemFont(ofSize: 11)
+        commandCodePath.widthAnchor.constraint(equalToConstant: 436).isActive = true
+        commandCodePath.isEnabled = draft.commandCode.enabled
+        content.addArrangedSubview(UI.stack([commandCodePath, UI.button("Choose…", target: self, action: #selector(chooseCommandCodeAuth))], vertical: false))
+        let commandCodeHelp = UI.label("Read-only: the app loads the API key from auth.json into memory for usage requests. It never writes, copies, or logs the key. Run `cmd login` to connect; COMMAND_CODE_API_KEY in the app’s environment takes precedence.", size: 10, color: .secondaryLabelColor)
+        commandCodeHelp.preferredMaxLayoutWidth = 558
+        content.addArrangedSubview(commandCodeHelp)
+        commandCodeStatus.preferredMaxLayoutWidth = 558
+        content.addArrangedSubview(commandCodeStatus)
+        updateCommandCodeStatus()
         interval.stringValue = String(draft.refreshMinutes)
         interval.widthAnchor.constraint(equalToConstant: 45).isActive = true
         content.addArrangedSubview(UI.stack([UI.label("Refresh every"), interval, UI.label("minutes (1–60)")], vertical: false))
         launch.state = SMAppService.mainApp.status == .enabled ? .on : .off
         launch.target = self; launch.action = #selector(changeLaunch)
         content.addArrangedSubview(launch)
-        let auto = UI.label("Auto-start sends ok once at 100%, then waits until a later check observes below 100% to re-arm. Attempts are saved before sending, including failures. Weekly allowance and no paid credits are required. This is best effort, not proof of a new window. Resets stay manual; no purchases.", size: 10, color: .secondaryLabelColor)
-        auto.preferredMaxLayoutWidth = 558
-        content.addArrangedSubview(auto)
         message.preferredMaxLayoutWidth = 558
         content.addArrangedSubview(message)
         content.addArrangedSubview(UI.stack([UI.button("Quit Codex Limits", target: self, action: #selector(quit)), UI.spacer(), UI.button("Save & Refresh", target: self, action: #selector(save))], vertical: false))
@@ -100,11 +112,12 @@ final class SettingsController: NSWindowController {
             button.title = monitor.states[slot]?.loginInProgress == true ? "Signing in…" : "Sign in…"
             let saved = monitor.settings.accounts.first { $0.slot == slot }
             button.isEnabled = !monitor.isBusy && saved != nil
-            if let saved { autoButtons[index].state = saved.autoStart ? .on : .off }
-            autoButtons[index].isEnabled = !monitor.isBusy && saved != nil
         }
         let errors = monitor.settings.accounts.compactMap { account in monitor.states[account.slot]?.error.map { "\(account.slot): \($0)" } }
         message.stringValue = errors.joined(separator: "\n")
+        if monitor.settings.commandCode.enabled, let error = monitor.commandCode.error {
+            message.stringValue = (message.stringValue.isEmpty ? "" : message.stringValue + "\n") + "Command Code: " + error
+        }
         resizeContent()
     }
     private func resizeContent(scrollToTop: Bool = false) {
@@ -123,10 +136,11 @@ final class SettingsController: NSWindowController {
         for index in updated.accounts.indices {
             updated.accounts[index].name = names[index].stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             updated.accounts[index].home = homes[index].stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            updated.accounts[index].autoStart = monitor.settings.accounts.first { $0.slot == updated.accounts[index].slot }?.autoStart ?? false
         }
         updated.codexPath = CodexExecutable.nativePath(executable.stringValue) ?? executable.stringValue
         updated.refreshMinutes = Int(interval.stringValue) ?? 0
+        updated.commandCode.enabled = commandCodeEnabled.state == .on
+        updated.commandCode.authFile = commandCodePath.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         return updated
     }
     @objc private func addAccount() {
@@ -143,11 +157,6 @@ final class SettingsController: NSWindowController {
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         draft = captureDraft(); draft.accounts.remove(at: sender.tag)
         build(); message.stringValue = "Account removed from this draft. Save & Refresh to apply."
-    }
-    @objc private func changeAuto(_ sender: NSButton) {
-        let slot = draft.accounts[sender.tag].slot
-        do { try monitor.setAutoStart(slot: slot, enabled: sender.state == .on) }
-        catch { message.stringValue = error.localizedDescription; sender.state = monitor.settings.accounts.first { $0.slot == slot }?.autoStart == true ? .on : .off }
     }
     @objc private func chooseHome(_ sender: NSButton) {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
@@ -166,6 +175,40 @@ final class SettingsController: NSWindowController {
             if let native = CodexExecutable.nativePath(url.path) { executable.stringValue = native }
             else { message.stringValue = "No native Codex executable found at this location." }
         }
+    }
+    @objc private func toggleCommandCode() {
+        commandCodePath.isEnabled = commandCodeEnabled.state == .on
+        draft = captureDraft()
+        updateCommandCodeStatus()
+    }
+    @objc private func chooseCommandCodeAuth() {
+        let panel = NSOpenPanel(); panel.canChooseFiles = true; panel.canChooseDirectories = false
+        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".commandcode")
+        panel.message = "Choose Command Code’s auth.json. It is read only; the key is never copied."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        commandCodePath.stringValue = url.path
+        commandCodeEnabled.state = .on
+        commandCodePath.isEnabled = true
+        draft = captureDraft()
+        updateCommandCodeStatus()
+    }
+    private func updateCommandCodeStatus() {
+        let value = commandCodePath.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            commandCodeStatus.stringValue = "Choose Command Code’s auth.json."
+            commandCodeStatus.textColor = .systemOrange
+            commandCodeStatus.isHidden = commandCodeEnabled.state != .on
+            return
+        }
+        let path = URL(fileURLWithPath: (value as NSString).expandingTildeInPath).standardizedFileURL.path
+        if FileManager.default.fileExists(atPath: path) {
+            commandCodeStatus.stringValue = "Found auth.json · read-only"
+            commandCodeStatus.textColor = .secondaryLabelColor
+        } else {
+            commandCodeStatus.stringValue = "Not found · run `cmd login` in Terminal, then Save & Refresh."
+            commandCodeStatus.textColor = .systemOrange
+        }
+        commandCodeStatus.isHidden = commandCodeEnabled.state != .on
     }
     @objc private func save() {
         let settings = captureDraft()

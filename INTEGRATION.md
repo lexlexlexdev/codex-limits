@@ -1,6 +1,6 @@
-# Official Codex integration findings
+# Integration findings
 
-Investigated on **2026-10-12**, on arm64 macOS with Swift 6.0.2 and **codex-cli 0.154.0**. Source: [openai/codex](https://github.com/openai/codex), inspected commit [`a9b0815167c27ab13719dd12d13b63e02b70d221`](https://github.com/openai/codex/tree/a9b0815167c27ab13719dd12d13b63e02b70d221). The installed CLI’s `app-server generate-ts` output independently confirms the fields used here. No private HTTP endpoint or extracted token is used by Codex Limits.
+Investigated on **2026-10-12**, on arm64 macOS with Swift 6.0.2 and **codex-cli 0.154.0**. Source: [openai/codex](https://github.com/openai/codex), inspected commit [`a9b0815167c27ab13719dd12d13b63e02b70d221`](https://github.com/openai/codex/tree/a9b0815167c27ab13719dd12d13b63e02b70d221). The installed CLI’s `app-server generate-ts` output independently confirms the Codex fields used here. The Codex sections use no private HTTP endpoint or extracted token. Command Code support is separate: it reads the CLI’s existing key and calls the CLI’s internal usage endpoints, documented below.
 
 ## Transport and reads
 
@@ -53,7 +53,7 @@ Evidence: [`account_processor/rate_limit_resets.rs`](https://github.com/openai/c
 
 ## Authentication isolation
 
-Account configuration now supports any number of slots. A/B settings are backward compatible. New slots have fresh UUID-suffixed homes; labels can be reused after removal, but credential directories are not. All configured homes and slot labels must be unique, and authenticated snapshots are checked for duplicate users/workspaces across every slot. Removal only changes monitoring configuration: it never deletes credentials, logs out an account, or copies tokens. Usage reads and warm-ups remain sequential to avoid multiplying helper memory by the number of accounts.
+Account configuration now supports any number of slots. A/B settings are backward compatible. New slots have fresh UUID-suffixed homes; labels can be reused after removal, but credential directories are not. All configured homes and slot labels must be unique, and authenticated snapshots are checked for duplicate users/workspaces across every slot. Removal only changes monitoring configuration: it never deletes credentials, logs out an account, or copies tokens. Codex usage reads remain sequential to avoid multiplying helper memory by the number of accounts.
 
 `CODEX_HOME` controls Codex’s local state and managed credential lifecycle. Each slot gets a canonical, separate directory and an independently established OAuth login. Credential storage is left to Codex, including its file/Keychain configuration; the app does not force an existing home to a different credential store.
 
@@ -65,34 +65,28 @@ Evidence: [`login/src/auth/manager.rs`](https://github.com/openai/codex/blob/a9b
 
 The child environment explicitly sets `CODEX_HOME` and removes inherited API/access/refresh-token selectors. Child stderr is discarded, no raw RPC payloads are logged, analytics/feedback/OTel exporters are disabled through process-local CLI overrides, and the ChatGPT base URL is pinned to Codex’s official default `https://chatgpt.com/backend-api/`. These are **Codex configuration overrides**, not direct application HTTP calls. Managed enterprise requirements remain enforced by Codex. Select the genuine official executable and do not use untrusted home configuration.
 
-## Window semantics and the best-effort auto-start policy
+## Window semantics
 
-[Managing usage with GPT-6 Astra in Work and Codex](https://help.openai.com/en/articles/20001516-managing-usage-with-gpt-6-astra-in-work-and-codex) explicitly states:
+The app displays only windows the server reports. Five-hour and weekly Codex windows are selected by duration (300 and 10080 minutes), not by primary/secondary ordering. `usedPercent` is converted to remaining with `100 − usedPercent`, clamped to 0–100. Some plans have no five-hour limit; the app shows unavailable rather than a fabricated percentage. Expired reset timestamps say **awaiting server update**; the app never locally refills a meter.
 
-> A new window starts when you send your first message in Work or Codex after the previous window ends.
+No inference is sent by monitoring. The former best-effort auto-start trigger has been removed: the app no longer sends `ok`, launches `codex exec`, writes an `auto-start.json` ledger, or exposes a 10-minute auto-start toggle. Monitoring remains read-only, and reset redemption is the only mutation, only after explicit confirmation.
 
-The same page explains plan differences, weekly gates, banked resets, global resets, and credit fallback. Some plans currently have no five-hour limit. A full banked reset refreshes both windows and changes the weekly reset date. [Paid weekly resets](https://help.openai.com/en/articles/20001507-paid-weekly-work-and-codex-rate-limit-resets) likewise change the weekly anchor, with the new weekly period starting on the next request. Neither “100% remaining” nor a shifted reset timestamp is a unique natural-window identity.
+## Command Code usage reads
 
-Supported execution methods include `codex exec` and app-server `thread/start` + `turn/start` with turn-completion notifications. Merely sending `ok` is not safe by itself: normal execution is an agent capable of tools, read-only sandboxing does not mean “never execute shell commands,” and ordinary inference can use eligible credits after included allowance is exhausted.
+Command Code support uses the HTTP endpoints the Command Code CLI uses (package `command-code` 1.88.0), not a documented public API:
 
-Current protocol still provides no documented atomic operation to:
+- `GET https://api.commandcode.ai/alpha/whoami?limits=1`
+- `GET /alpha/billing/credits?orgId=…`
+- `GET /alpha/billing/subscriptions?orgId=…`
+- `GET /alpha/usage/summary?orgId=…&since=…`
+- Header: `Authorization: Bearer <key>`. The key comes from `COMMAND_CODE_API_KEY` or `~/.commandcode/auth.json`.
 
-- Identify and claim one new natural window, distinguishing manual/global/banked resets.
-- Guarantee that the next inference consumes **only included allowance**, regardless of another client’s concurrent usage.
-- Perform that claim and inference with an execution idempotency key tied to the verified window.
+The credits response provides `credits.{monthlyCredits,purchasedCredits,freeCredits,planId}`, `windowLimits.{limited,fiveHour,weekly}.{used,cap,resetAt}`, and optional sandbox fields. `resetAt` is in milliseconds. Subscription `data.{planId,status,currentPeriodStart,currentPeriodEnd}` and summary `totalCost`/`totalCount` supply renewal and spend context. These projections were extracted from the CLI bundle; no public API schema guarantees them.
 
-`ordinaryUsageAllowed` is explicitly optional backend permission from a snapshot; protocol documentation says not to infer recovery from percentages or reset times. Even a true read is not a transaction spanning the subsequent turn. Auto-start was originally disabled because the strict original requirements could not be proven. The user subsequently requested a **best-effort 100% trigger**, and specified re-arming after a reading below 100%, including manual/global resets.
-
-The implemented heuristic checks enabled slots every 600 seconds, requires five-hour `usedPercent == 0`, positive weekly allowance, ordinary permission, and a credit snapshot showing no paid entitlement/balance. A separate preflight checks those fields and account identity immediately before execution. The `auto-start.json` ledger claims the account/home/workspace attempt **before dispatch**. Repeated 100% readings and reset timestamps alone do not re-arm; only a later 10-minute check below 100% does. No automatic retry is performed, including after crash or uncertain completion. No reset/purchase API is involved. Credit checks are best effort, not an atomic billing safeguard.
-
-The execution interface is installed CLI 0.154.0's **`codex exec --json --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --strict-config --sandbox read-only --cd <disposable>`**. Official `features.shell_tool=false` is checked in `core/src/tools/spec_plan.rs`: shell registration returns immediately when disabled. Hooks, plugins, apps, agents, browser/computer use, and code-mode executors are also disabled. User/project instructions are omitted via `project_doc_max_bytes=0`. The official exec event contract (`exec/src/exec_events.rs`) provides `turn.completed`, `turn.failed`, and typed item events. Success requires completion plus exit code zero; non-message/reasoning items abort the attempt. There is no fake successful start event.
-
-An outer native macOS `sandbox-exec` profile permits only the selected Codex executable to be exec'd and confines writes to dedicated state/scratch. Shell execution is kernel-denied, not merely discouraged by a prompt. Codex's inner read-only tool policy handles patch/file modification restrictions. If the CLI version, configuration, OS sandbox, or authentication prevents this mode, the attempt is recorded as failed/unknown and stays latched. No runtime sandbox relaxation is attempted. The kernel profile is tested with the actual installed CLI's `--version`, never a real prompt.
-
-This feature intentionally does **not** claim the stronger original semantics. An unobserved dip below 100% can miss re-arming; rounding or a global reset can trigger within an existing natural window; a changed paid-credit state between preflight and inference is not atomically prevented. Future strict-window support would still require a backend-owned window identity and reservation/idempotent included-only execution contract.
+The app derives remaining window percentages as `1 − used/cap`. Monthly remaining uses the plan’s monthly allowance when the subscription is active, otherwise `totalCost + remaining`; missing credits, caps, or dates are shown as unavailable. The key is held in memory for the request, never written back, logged, or included in errors. The app makes no Command Code model requests and no purchase/reset calls. A missing `auth.json` is a distinct not-connected state; a 401/403 stops automatic retries until the user signs in again.
 
 ## Process cost and limitations
 
 Short-lived processes were selected after testing the installed native server. A fresh-home handshake/account read/explicit shutdown took approximately **0.62 seconds** before the final lazy-UI optimization. Startup helpers are transient; zero children remained idle. See [PERFORMANCE.md](PERFORMANCE.md) for measured app and tree RSS/CPU, methodology, and the unverified authenticated case.
 
-No dedicated authenticated test accounts were supplied. Actual OAuth completion, live network snapshots, auto-start inference, and actual banked expirations are implemented against verified official contracts but not claimed as exercised with several signed-in users. No user credentials were copied or existing application authentication refreshed during validation. No inference or real banked-reset redemption was performed in tests.
+No dedicated authenticated test accounts were supplied. Actual OAuth completion, live network snapshots, and real banked expirations are implemented against verified official contracts but not claimed as exercised with several signed-in users. The Command Code client was validated against a rejected credential and decoder fixtures, not a live authenticated account. No user credentials were copied or existing application authentication refreshed during validation. No inference or real banked-reset redemption was performed in tests.
