@@ -185,23 +185,19 @@ final class CommandCodeView: NSStackView {
         if let snapshot {
             let identity = [snapshot.userName, snapshot.orgLogin.map { "@\($0)" }].compactMap { $0 }.joined(separator: " · ")
             addArrangedSubview(UI.label(identity, size: 10, color: .secondaryLabelColor))
-            addWindow("Monthly", percent: snapshot.monthlyRemainingPercent)
-            if let end = snapshot.currentPeriodEnd {
-                let days = snapshot.daysUntilRenewal()
-                let renewal = days == 0 ? "Renews today" : "Renews in \(days ?? 0)d"
-                addDetail("\(renewal) · \(DisplayTime.absolute(end))")
-            } else {
-                addDetail("Renewal date unavailable")
-            }
             if let limits = snapshot.windowLimits, limits.limited {
                 if limits.fiveHour != nil { addWindow("5-hour", percent: limits.fiveHour?.remaining) }
                 if let window = limits.fiveHour { addReset("5h", window) }
                 if limits.weekly != nil { addWindow("Weekly", percent: limits.weekly?.remaining) }
                 if let window = limits.weekly { addReset("Weekly", window) }
-            } else if snapshot.windowLimits != nil {
-                addDetail("No 5-hour or weekly caps on this account")
+                addMonthly(snapshot)
             } else {
-                addDetail("Window caps unavailable")
+                addMonthly(snapshot)
+                if snapshot.windowLimits != nil {
+                    addDetail("No 5-hour or weekly caps on this account")
+                } else {
+                    addDetail("Window caps unavailable")
+                }
             }
             if let credits = snapshot.credits, credits.extraRemaining > 0 {
                 addDetail("Extra credits · " + Self.money(credits.extraRemaining) + " (not capped)")
@@ -243,6 +239,17 @@ final class CommandCodeView: NSStackView {
         let row = UI.stack([titleView, AllowanceBar(remaining: percent), UI.spacer(), number], vertical: false)
         row.widthAnchor.constraint(equalToConstant: 312).isActive = true
         addArrangedSubview(row)
+    }
+
+    private func addMonthly(_ snapshot: CommandCodeSnapshot) {
+        addWindow("Monthly", percent: snapshot.monthlyRemainingPercent)
+        if let end = snapshot.currentPeriodEnd {
+            let days = snapshot.daysUntilRenewal()
+            let renewal = days == 0 ? "Renews today" : "Renews in \(days ?? 0)d"
+            addDetail("\(renewal) · \(DisplayTime.absolute(end))")
+        } else {
+            addDetail("Renewal date unavailable")
+        }
     }
 
     private func addReset(_ title: String, _ window: CommandCodeWindow) {
