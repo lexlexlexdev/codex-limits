@@ -85,8 +85,27 @@ The credits response provides `credits.{monthlyCredits,purchasedCredits,freeCred
 
 The app derives remaining window percentages as `1 − used/cap`. Monthly remaining uses the plan’s monthly allowance when the subscription is active, otherwise `totalCost + remaining`; missing credits, caps, or dates are shown as unavailable. The key is held in memory for the request, never written back, logged, or included in errors. The app makes no Command Code model requests and no purchase/reset calls. A missing `auth.json` is a distinct not-connected state; a 401/403 stops automatic retries until the user signs in again.
 
+Menu bar output is not provider-specific: `MenuBarText` composes segments from a per-provider state (`fiveHour`, `weekly`, optional monthly `fallback`, `failed`) and one `MenuBarPreferences` value. The status item and both previews call the same function, so the preview cannot drift from the real title. Unknown windows render as `—`; the error marker is advisory and never changes a number.
+
+## Claude Code usage reads
+
+Claude Code support reads the OAuth credential Claude Code already saved and calls the endpoint its `/usage` command uses. It is **undocumented**:
+
+- `GET https://api.anthropic.com/api/oauth/usage`
+- Headers: `Authorization: Bearer <claudeAiOauth.accessToken>`, `anthropic-beta: oauth-2025-04-20`, `Accept: application/json`.
+
+Response buckets: `five_hour.{utilization,resets_at}`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, and `extra_usage.{is_enabled,monthly_limit,used_credits,utilization}`. `utilization` is the percent consumed in `[0, 100]`; remaining is `100 − utilization`, clamped. `resets_at` is RFC 3339 (with or without fractional seconds). **Any bucket may be null** for plans without that quota, and a missing bucket is shown as unavailable rather than 0%.
+
+Credential resolution order is `CLAUDE_CODE_OAUTH_TOKEN`, then the login keychain item `Claude Code-credentials`, then an optional credentials file (default `~/.claude/.credentials.json`). The keychain is read by executing `/usr/bin/security find-generic-password -s <service> -w`, which already has access to the item Claude Code created; a differently signed app reading the keychain directly would prompt. The token and refresh token stay in memory; nothing is written back.
+
+`expiresAt` is epoch **milliseconds** in current Claude Code builds (values ≥ 1e11); older builds wrote seconds, so the unit is detected. The app **never refreshes or rewrites** this credential: it is a shared file/keychain item owned by Claude Code, and a partial or unit-mismatched write would corrupt the owner’s login. An expired or empty saved token is reported with a recovery instruction (open Claude Code once) and is not retried as a transient failure. A 401/403 stops automatic retries; 429 and 5xx use the same bounded 30/60/120-second recovery as other providers. Verified against the 401 response for an invalid bearer token; a live authenticated response was not available here.
+
 ## Process cost and limitations
 
 Short-lived processes were selected after testing the installed native server. A fresh-home handshake/account read/explicit shutdown took approximately **0.62 seconds** before the final lazy-UI optimization. Startup helpers are transient; zero children remained idle. See [PERFORMANCE.md](PERFORMANCE.md) for measured app and tree RSS/CPU, methodology, and the unverified authenticated case.
 
-No dedicated authenticated test accounts were supplied. Actual OAuth completion, live network snapshots, and real banked expirations are implemented against verified official contracts but not claimed as exercised with several signed-in users. The Command Code client was validated against a rejected credential and decoder fixtures, not a live authenticated account. No user credentials were copied or existing application authentication refreshed during validation. No inference or real banked-reset redemption was performed in tests.
+No dedicated authenticated test accounts were supplied. Actual OAuth completion, live network snapshots, and real banked expirations are implemented against verified official contracts but not claimed as exercised with several signed-in users. The Command Code client was validated against a rejected credential and decoder fixtures, not a live authenticated account. The Claude Code client was validated against decoder fixtures and a rejected bearer token (401); the keychain read path itself was exercised on this host, which holds an empty token, so no live meter was produced. No user credentials were copied or existing application authentication refreshed during validation. No inference or real banked-reset redemption was performed in tests.
+
+## Claude Code integration status
+
+Added in 1.5.0. `ClaudeCodeSnapshot` mirrors the server buckets without inventing values, and `ClaudeCodeFailure` separates not-connected, authentication, configuration, transient, and protocol states so the UI can point at the right recovery step. `ClaudeCodeConfiguration` records whether the keychain, the credentials file, or both are allowed; `Settings.validate()` rejects a configuration with neither source.

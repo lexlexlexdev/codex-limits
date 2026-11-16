@@ -1,6 +1,6 @@
 # Codex Limits
 
-A native Apple Silicon menu bar monitor for **multiple independent ChatGPT users**, with optional **Command Code** usage tracking. Add Codex accounts as needed; there is no two-account limit. AppKit, Swift, Foundation, and Network.framework only. No WebView, Node runtime, analytics, backend, or persistent Codex helper.
+A native Apple Silicon menu bar monitor for **multiple independent ChatGPT users**, with optional **Command Code** and **Claude Code** usage tracking and **configurable menu bar output**. Add Codex accounts as needed; there is no two-account limit. AppKit, Swift, Foundation, and Network.framework only. No WebView, Node runtime, analytics, backend, or persistent Codex helper.
 
 ## Install
 
@@ -53,17 +53,44 @@ Only one Command Code login is tracked because the CLI stores one credential set
 
 The app loads the API key into memory for read-only requests. It never writes `auth.json`, never copies or logs the key, and never calls Command Code model endpoints. Command Code’s `/alpha/whoami`, `/alpha/billing/credits`, `/alpha/billing/subscriptions`, and `/alpha/usage/summary` endpoints are internal CLI endpoints rather than a documented public API; they may change. Missing fields show unavailable, not zero.
 
+## Claude Code (optional)
+
+Codex Limits can also show a Claude subscription’s usage using the sign-in Claude Code already stored, so there is no second login:
+
+1. Sign in to Claude Code once (`claude`, then `/login`).
+2. Open **Settings → Claude Code**, enable **Monitor Claude Code**, then **Save & Refresh**.
+3. Keep **Read credentials from the login keychain** and the service name `Claude Code-credentials`, or choose a credentials file such as `~/.claude/.credentials.json`.
+4. `CLAUDE_CODE_OAUTH_TOKEN` in the app’s launch environment takes precedence.
+
+The card shows the server-reported 5-hour window, weekly window, weekly Opus/Sonnet windows when the plan reports them, their reset times, and pay-as-you-go extra usage when enabled. Buckets a plan does not have stay **unavailable** instead of showing 0%.
+
+The app reads Claude Code’s saved OAuth credential and calls `GET https://api.anthropic.com/api/oauth/usage` with the `anthropic-beta: oauth-2025-04-20` header that Claude Code itself uses. The credential is read-only: the app never refreshes, rewrites, copies, or logs the token, and never writes `.credentials.json`. An expired or empty saved token is reported with a recovery message rather than repaired, because Claude Code owns that lifecycle. Read from the keychain through `/usr/bin/security` so no new keychain prompt appears for this locally signed app. This usage endpoint is undocumented and may change; an incompatible response becomes an error instead of a fabricated meter.
+
+## Menu bar
+
+Click the status item, or open **Settings → Menu bar**, to control exactly what the menu bar shows. **The same title is drawn in a live preview strip** above the options, so you see the result before saving.
+
+- **Show ◈ icon** and **Show provider labels** control the prefix and whether providers are named (`A: 74%` vs `74%`).
+- **Codex windows** picks 5-hour, weekly, or both (`74%/52%`) for every Codex account; **accounts** sets how many slots appear, with the rest collapsed into `+N`.
+- **Include Command Code** and **Include Claude Code** add or remove those providers; each has its own window picker.
+- Each account has a **Show account X in the menu bar** switch, so specific Codex slots can be hidden without removing them.
+- **Mark stale or failed providers with !** toggles the error marker; with it off, a failed provider still shows its last value and a tooltip explanation.
+- **Collapse extra accounts into +N** toggles the overflow segment itself.
+
+The preferred defaults remain the previous behavior: `◈ A: 74% · B: 68% · CC: 55%` for the first three accounts plus enabled providers. An em dash means unavailable/not applicable. Settings changes take effect on **Save & Refresh**; the preview uses current live values as you edit.
+
 ## What is shown
 
-- Menu bar: **remaining five-hour allowance**, for the first three Codex slots plus `+N` for additional accounts, followed by `CC:` for Command Code when enabled. All accounts appear in the popover. An em dash means unavailable/not applicable; `!` means an error or stale data. Plans without a five-hour limit do not get a fabricated percentage.
+- Menu bar: controlled by the **Menu bar** settings above and previewed there before saving. The default is the **remaining five-hour allowance** for the first three Codex slots plus `+N` for additional accounts, followed by `CC:` for Command Code and `Claude:` for Claude Code when enabled. All accounts appear in the popover. An em dash means unavailable/not applicable; `!` means an error or stale data. Plans without a five-hour limit do not get a fabricated percentage.
 - Popover: real five-hour and weekly windows, selected by the server’s duration, not assumed primary/secondary ordering. Percentages are `100 − usedPercent`, clamped to 0–100. Codex rounds its reported usage, so these are server-reported estimates, not sub-percent measurements.
 - Command Code: the card shows remaining monthly credits, 5-hour and weekly caps, reset countdowns, renewal, and extra credits. `windowLimits` values are server-reported credit amounts, not request counts; the app converts them to remaining percentages. A pay-as-you-go account without caps falls back to monthly remaining without inventing a window.
+- Claude Code: the card shows remaining 5-hour and weekly allowance, per-model weekly windows when reported, reset times, and extra usage. Percentages are `100 − utilization`, clamped to 0–100. A bucket a plan does not have stays unavailable; it is never shown as 0%.
 - Window dates use server Unix timestamps and your local timezone. Expired timestamps say **awaiting server update**; the app never locally refills a meter. Countdown text is updated once per minute **only while the popover is open**.
 - Banked resets: separate compact, expandable lists, sorted by expiration. Orange at ≤72 hours; red at <24 hours or expired. `expiresAt: null` explicitly means non-expiring. Missing/incomplete fields mean **unavailable**, not “no expiration.” A count-only or capped response shows how many details are unavailable. Ordinary credit balances are never interpreted as banked resets.
 - **Apply a reset:** click its compact expiration row, review the account and expiry in the confirmation dialog, then choose **Apply Reset**. Cancel is the default action. The app rereads identity, workspace, and the exact reset before using the supported `account/rateLimitResetCredit/consume` method. A result dialog distinguishes applied, already applied, nothing eligible to reset, and no reset available; usage is reread afterward. Your weekly reset date may change. This does not purchase anything or run a model request.
 - Reset buttons are disabled for expired resets, unverified identity, errors, offline state, or another active operation. Count-only reset data cannot be redeemed by guessing which credit to consume; use **Open Usage** instead.
 - A request key is saved locally **before submission** in `reset-attempts.json` (mode 0600, no OAuth tokens). A timeout or lost response is reported as **unknown**, never success, and is not automatically retried. A later explicit confirmation for the same account/home/workspace/reset reuses its saved key, including after restart. A known `nothingToReset` or `noCredit` result ends that attempt; a later confirmation starts a new one. Background refresh and startup never consume resets.
-- **Codex usage** opens [the official usage page](https://chatgpt.com/codex/settings/usage). It uses your browser’s current account; confirm or switch the browser account before redeeming there. There is no supported credential-free deep link that signs your browser into the selected local slot. **Command Code** opens [the Command Code usage page](https://commandcode.ai/usage).
+- **Codex usage** opens [the official usage page](https://chatgpt.com/codex/settings/usage). It uses your browser’s current account; confirm or switch the browser account before redeeming there. There is no supported credential-free deep link that signs your browser into the selected local slot. **Command Code** opens [the Command Code usage page](https://commandcode.ai/usage); **Claude** opens [the Claude account usage page](https://claude.ai/settings/usage).
 
 Polling is sequential across Codex accounts to keep peak process-tree memory down. Each Codex account read starts a short-lived `codex app-server`, performs the official handshake, reads identity and usage, checks identity again, and closes it. Ordinary monitoring sends no model requests. Command Code is read over HTTPS with the existing CLI login and does not launch the Command Code agent. Reset redemption occurs only after explicit confirmation. No purchases are made. Background refresh works without an open popover. Sleep cancels running helpers, wake checks freshness, and offline polling is suspended through `NWPathMonitor`. Transient read errors have bounded 30/60/120-second recovery delays before ordinary polling resumes; authentication/configuration errors require user action. These retries never resend reset mutations. Raw server errors and stderr are not displayed or logged because they can contain sensitive information.
 
@@ -95,13 +122,20 @@ Read-only Command Code probe:
 "dist/Codex Limits.app/Contents/MacOS/CodexLimits" --command-code-probe --auth "$HOME/.commandcode/auth.json"
 ```
 
+Read-only Claude Code probe (keychain, then optional file):
+
+```sh
+"dist/Codex Limits.app/Contents/MacOS/CodexLimits" --claude-probe
+"dist/Codex Limits.app/Contents/MacOS/CodexLimits" --claude-probe --keychain "Claude Code-credentials" --credentials ~/.claude/.credentials.json
+```
+
 Both perform no login or inference and print no identity or key. They return 1 when signed out or rejected, 2 for transient failures, and 0 for a decoded usage response.
 
 ## Verification and performance
 
-**44 unit tests cover the current implementation**, including 32-slot persistence, non-adjacent duplicate-account detection, empty account lists, safe removal, and A/B migration. The release action/layout test passes with five disposable Codex slots plus the Command Code card. Checks cover nonzero popover width, account content, visible refresh, click-to-close, Settings, and adding a draft account. A captured popover and Command Code card were inspected to check controls are not clipped. Posted mouse-event tests passed during debugging but later failed to deliver clicks to the status-button action on this multi-display host; physical left-click behavior was not re-tested.
+**74 unit tests cover the current implementation**, including 32-slot persistence, non-adjacent duplicate-account detection, empty account lists, safe removal, and A/B migration. The release action/layout test passes with five disposable Codex slots plus the Command Code and Claude Code cards, and it verifies that the menu bar preview updates when a display option changes. Checks cover nonzero popover width, account content, visible refresh, click-to-close, Settings, and adding a draft account. Menu bar composition is covered by unit tests for labels on/off, icon on/off, both-window formatting, per-provider fallbacks, hidden slots, overflow `+N`, and legacy settings migration. Snapshots are rendered as PDF because `cacheDisplay` omits `NSTextField` text for offscreen views. Posted mouse-event tests passed during debugging but later failed to deliver clicks to the status-button action on this multi-display host; physical left-click behavior was not re-tested.
 
-Manual redemption is tested without live account mutations or inference, against verified official interfaces. No real reset or model request was used in testing. The Command Code path was exercised against a rejected credential (401) and with decoder fixtures; a live authenticated Command Code response was not available in this environment. Multiple authenticated accounts, live Codex/Command Code reads, real banked-reset entries, browser login completion, sleep/wake, and launch-at-login still require interactive validation.
+Manual redemption is tested without live account mutations or inference, against verified official interfaces. No real reset or model request was used in testing. The Command Code path was exercised against a rejected credential (401) and with decoder fixtures; a live authenticated Command Code response was not available in this environment. Claude Code decoding, credential resolution precedence, expiry-unit handling, and empty/absent-token reporting are covered by fixtures; this host’s saved Claude keychain item has an **empty** access token, so that path reports a recovery message instead of a live meter. A live authenticated Claude response was not available. Multiple authenticated accounts, live Codex/Command Code/Claude reads, real banked-reset entries, browser login completion, sleep/wake, and launch-at-login still require interactive validation.
 
 [PERFORMANCE.md](PERFORMANCE.md) records app-only and process-tree measurements. Closed-popover idle RSS was **39.25 MiB**, idle CPU **0.00%** at the measurement’s precision, and **zero idle child processes**. The <30 MB RSS target was **not reached**; authenticated refresh peaks have not been measured. Do not interpret signed-out startup figures as the cost of authenticated network polling.
 
@@ -114,13 +148,13 @@ python3 tools/measure.py --seconds 30 --popover
 
 Python is used only by this optional measurement tool, never by the app.
 
-For a credential-free action/layout check, run `"dist/Codex Limits.app/Contents/MacOS/CodexLimits" --ui-smoke-test`. For the **real mouse-event path**, use `--ui-mouse-test` instead; event-posting permission must already be available to the test process. This permission is not needed for ordinary manual use. Both modes use disposable settings, disable polling, verify Codex account content, the Command Code card, and popover sizing, check show/refresh/close, and exercise Settings/Add Account without saving real configuration. No real account data or inference is accessed. `--ui-snapshot /absolute/path.png` captures the isolated popover; `--ui-command-code-snapshot /absolute/path.png` captures the Command Code card; `--ui-settings-snapshot /absolute/path.png` captures the Settings window.
+For a credential-free action/layout check, run `"dist/Codex Limits.app/Contents/MacOS/CodexLimits" --ui-smoke-test`. For the **real mouse-event path**, use `--ui-mouse-test` instead; event-posting permission must already be available to the test process. This permission is not needed for ordinary manual use. Both modes use disposable settings, disable polling, verify Codex account content, the Command Code and Claude Code cards, the menu bar preview, and popover sizing, check show/refresh/close, and exercise Settings/Add Account without saving real configuration. No real account data or inference is accessed. Snapshot flags (`--ui-snapshot`, `--ui-command-code-snapshot`, `--ui-claude-snapshot`, `--ui-settings-snapshot`, `--ui-settings-document-snapshot`) write a PDF of the named surface to the given path.
 
 ## Project
 
 ```text
 Sources/CodexLimits/  AppKit lifecycle, menu bar, popover, settings, polling
-Sources/LimitsCore/  Codex protocol, Command Code client, isolation, settings
+Sources/LimitsCore/  Codex protocol, Command Code and Claude Code clients, menu bar text, isolation, settings
 Tests/               Fixtures and unit tests
 tools/measure.py     Optional process-tree performance measurement
 build.sh             Release .app builder

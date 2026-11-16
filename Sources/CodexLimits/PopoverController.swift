@@ -54,7 +54,19 @@ final class PopoverController: NSViewController {
                 summary += " · Command Code checking"
             }
         }
+        if monitor.settings.claudeCode.enabled {
+            if monitor.claudeCodeConnected {
+                summary += " · Claude Code connected"
+            } else if monitor.claudeCode.notConnected || !monitor.settings.claudeCode.hasCredential {
+                summary += " · Claude Code not connected"
+            } else if monitor.claudeCode.error != nil {
+                summary += " · Claude Code needs attention"
+            } else {
+                summary += " · Claude Code checking"
+            }
+        }
         let content = UI.stack([UI.label(summary, size: 11, color: .secondaryLabelColor), UI.divider()], spacing: 10)
+        content.addArrangedSubview(MenuBarPreviewView(title: monitor.menuBarTitle().title))
         if monitor.settings.accounts.isEmpty {
             content.addArrangedSubview(UI.label("No Codex accounts configured. Use Settings → Add Account.", color: .secondaryLabelColor))
         }
@@ -65,7 +77,11 @@ final class PopoverController: NSViewController {
         if monitor.settings.commandCode.enabled {
             content.addArrangedSubview(CommandCodeView(configuration: monitor.settings.commandCode, state: monitor.commandCode, target: self, openAction: #selector(openCommandCode)))
         }
-        let last = (monitor.states.values.compactMap { $0.snapshot?.fetchedAt } + [monitor.commandCode.snapshot?.fetchedAt].compactMap { $0 }).min()
+        if monitor.settings.claudeCode.enabled {
+            content.addArrangedSubview(ClaudeCodeView(configuration: monitor.settings.claudeCode, state: monitor.claudeCode, target: self, openAction: #selector(openClaudeCode)))
+        }
+        let last = (monitor.states.values.compactMap { $0.snapshot?.fetchedAt }
+            + [monitor.commandCode.snapshot?.fetchedAt, monitor.claudeCode.snapshot?.fetchedAt].compactMap { $0 }).min()
         let footer: String
         if monitor.isOffline { footer = "● Offline · last successful data shown" }
         else if monitor.isRefreshing { footer = "● Updating…" }
@@ -74,7 +90,9 @@ final class PopoverController: NSViewController {
             footer = minutes == 0 ? "● Updated just now" : "● Updated \(minutes)m ago"
         } else { footer = "● Configure accounts in Settings" }
         content.addArrangedSubview(UI.label(footer, size: 10, color: .secondaryLabelColor))
-        let bottom = UI.stack([UI.label("Refresh every \(monitor.settings.refreshMinutes) min", size: 10, color: .secondaryLabelColor), UI.spacer(), UI.button("Codex usage ↗", target: self, action: #selector(openUsage))], vertical: false)
+        let bottom = UI.stack([UI.label("Refresh every \(monitor.settings.refreshMinutes) min", size: 10, color: .secondaryLabelColor), UI.spacer(),
+                               UI.button("Codex usage ↗", target: self, action: #selector(openUsage)),
+                               UI.button("Claude ↗", target: self, action: #selector(openClaudeCode))], vertical: false)
         bottom.widthAnchor.constraint(equalToConstant: 312).isActive = true
         content.addArrangedSubview(bottom)
         for child in content.arrangedSubviews { child.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true }
@@ -162,4 +180,5 @@ final class PopoverController: NSViewController {
     }
     @objc private func openUsage() { NSWorkspace.shared.open(URL(string: "https://chatgpt.com/codex/settings/usage")!) }
     @objc private func openCommandCode() { NSWorkspace.shared.open(URL(string: "https://commandcode.ai/usage")!) }
+    @objc private func openClaudeCode() { NSWorkspace.shared.open(URL(string: "https://claude.ai/settings/usage")!) }
 }

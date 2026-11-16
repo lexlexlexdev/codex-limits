@@ -270,7 +270,7 @@ public final class CommandCodeClient: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("CodexLimits/1.4", forHTTPHeaderField: "User-Agent")
+        request.setValue("CodexLimits/1.5", forHTTPHeaderField: "User-Agent")
 
         let data: Data
         let response: URLResponse

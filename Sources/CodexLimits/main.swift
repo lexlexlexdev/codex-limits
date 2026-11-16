@@ -32,6 +32,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
             if uiSmokeTest {
                 for _ in 0..<3 { loaded.addAccount(root: root) }
                 loaded.commandCode = CommandCodeConfiguration(enabled: true, authFile: root.appendingPathComponent("no-command-code-auth.json").path)
+                loaded.claudeCode = ClaudeCodeConfiguration(enabled: true, useKeychain: false,
+                    credentialsFile: root.appendingPathComponent("no-claude-credentials.json").path)
             }
             settings = loaded
         }
@@ -67,28 +69,16 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         update()
         if uiSmokeTest { runPopoverSmokeTest(); return }
         monitor.start()
-        if settings.codexPath.isEmpty && !settings.commandCode.enabled { showSettings() }
+        if settings.codexPath.isEmpty && !settings.commandCode.enabled && !settings.claudeCode.enabled { showSettings() }
         if CommandLine.arguments.contains("--show-popover") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.togglePopover() }
         }
     }
     private func update() {
-        let codexParts = monitor.settings.accounts.map { account -> String in
-            let state = monitor.states[account.slot]!
-            let number = state.snapshot?.usage.codex?.fiveHour.map { "\($0.remaining)%" } ?? "—"
-            return "\(account.slot): \(number)\(state.error == nil ? "" : "!")"
-        }
-        var parts = Array(codexParts.prefix(3))
-        let overflow = codexParts.count > 3 ? " · +\(codexParts.count - 3)" : ""
-        if monitor.settings.commandCode.enabled {
-            let state = monitor.commandCode
-            let number = state.snapshot?.menuBarRemaining.map { "\($0)%" } ?? "—"
-            parts.append("CC: \(number)\(state.error == nil ? "" : "!")")
-        }
-        let title = parts.isEmpty ? "◈ Codex Limits" : "◈ " + parts.joined(separator: " · ") + overflow
-        statusItem.button?.title = title
-        statusItem.button?.toolTip = "Codex Limits · remaining 5-hour allowance; CC is Command Code. ! means stale/error. Click for details."
-        statusItem.button?.setAccessibilityLabel("Codex Limits, " + parts.joined(separator: ", "))
+        let text = monitor.menuBarTitle()
+        statusItem.button?.title = text.title
+        statusItem.button?.toolTip = text.toolTip
+        statusItem.button?.setAccessibilityLabel(text.accessibilityLabel)
         if popover?.isShown == true { controller.render() }
         settingsController?.updateStatus()
     }
@@ -206,16 +196,17 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
                       commandCodeView.frame.height > 40 else {
                     fputs("UI smoke: Command Code card is missing or has collapsed layout\n", stderr); exit(1)
                 }
-                if let index = CommandLine.arguments.firstIndex(of: "--ui-snapshot"), CommandLine.arguments.count > index + 1,
-                   let image = controller.view.bitmapImageRepForCachingDisplay(in: controller.view.bounds) {
-                    controller.view.cacheDisplay(in: controller.view.bounds, to: image)
-                    try? image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+                guard let claudeView = findViews(in: controller.view).compactMap({ $0 as? ClaudeCodeView }).first,
+                      claudeView.frame.height > 40 else {
+                    fputs("UI smoke: Claude Code card is missing or has collapsed layout\n", stderr); exit(1)
                 }
-                if let index = CommandLine.arguments.firstIndex(of: "--ui-command-code-snapshot"), CommandLine.arguments.count > index + 1,
-                   let image = commandCodeView.bitmapImageRepForCachingDisplay(in: commandCodeView.bounds) {
-                    commandCodeView.cacheDisplay(in: commandCodeView.bounds, to: image)
-                    try? image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+                guard let preview = findViews(in: controller.view).compactMap({ $0 as? MenuBarPreviewView }).first,
+                      preview.frame.width >= 300, !monitor.menuBarTitle().title.isEmpty else {
+                    fputs("UI smoke: menu bar preview is missing or empty\n", stderr); exit(1)
                 }
+                writeSnapshot(claudeView, flag: "--ui-claude-snapshot")
+                writeSnapshot(controller.view, flag: "--ui-snapshot")
+                writeSnapshot(commandCodeView, flag: "--ui-command-code-snapshot")
                 controller.render() // Exercise the normal refresh/render path while visible.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
                     guard popover.isShown else { fputs("UI smoke: popover closed during refresh\n", stderr); exit(1) }
@@ -228,10 +219,36 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
                               let add = findViews(in: content).compactMap({ $0 as? NSButton }).first(where: { $0.title == "+ Add Account" }) else {
                             fputs("UI smoke: Settings/Add Account is not visible\n", stderr); exit(1)
                         }
-                        if let index = CommandLine.arguments.firstIndex(of: "--ui-settings-snapshot"), CommandLine.arguments.count > index + 1,
-                           let image = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
-                            content.cacheDisplay(in: content.bounds, to: image)
-                            try? image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+                        writeSnapshot(content, flag: "--ui-settings-snapshot")
+                        guard let settingsDocument = findViews(in: content).compactMap({ $0 as? NSScrollView }).first?.documentView else {
+                            fputs("UI smoke: Settings document is missing\n", stderr); exit(1)
+                        }
+                        writeSnapshot(settingsDocument, flag: "--ui-settings-document-snapshot")
+                        let documentViews = findViews(in: settingsDocument)
+                        guard let settingsPreview = documentViews.compactMap({ $0 as? MenuBarPreviewView }).first else {
+                            fputs("UI smoke: Settings menu bar preview is missing\n", stderr); exit(1)
+                        }
+                        let buttons = documentViews.compactMap { $0 as? NSButton }
+                        let checkboxes = Set(buttons.map(\.title))
+                        guard buttons.contains(where: { $0.title == "Monitor Claude Code" }) else {
+                            fputs("UI smoke: Claude Code settings section is missing\n", stderr); exit(1)
+                        }
+                        guard checkboxes.contains("Show ◈ icon"), checkboxes.contains("Show provider labels"),
+                              checkboxes.contains("Include Claude Code"), checkboxes.contains("Include Command Code") else {
+                            fputs("UI smoke: menu bar visibility checkboxes are missing\n", stderr); exit(1)
+                        }
+                        guard documentViews.compactMap({ $0 as? NSPopUpButton }).count >= 4 else {
+                            fputs("UI smoke: menu bar window/account pickers are missing\n", stderr); exit(1)
+                        }
+                        let beforeLabels = settingsPreview.title
+                        print("UI smoke menu bar preview: \(beforeLabels)")
+                        if let labels = buttons.first(where: { $0.title == "Show provider labels" }) {
+                            // performClick flips a switch button's state and sends its action.
+                            labels.performClick(nil)
+                        }
+                        guard let updatedPreview = findViews(in: settingsDocument).compactMap({ $0 as? MenuBarPreviewView }).first,
+                              updatedPreview.title != beforeLabels else {
+                            fputs("UI smoke: menu bar preview did not update when labels were toggled\n", stderr); exit(1)
                         }
                         add.performClick(nil)
                         let loginButtons = findViews(in: content).compactMap { $0 as? NSButton }.filter { $0.title == "Sign in…" }
@@ -245,6 +262,14 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
             }
         }
     }
+    // cacheDisplay skips NSTextField text for offscreen views, so snapshots are rendered
+    // as PDF (which includes text) and written next to a raster copy for inspection.
+    private func writeSnapshot(_ view: NSView, flag: String) {
+        guard let index = CommandLine.arguments.firstIndex(of: flag), CommandLine.arguments.count > index + 1,
+              view.bounds.width > 1, view.bounds.height > 1 else { return }
+        let path = CommandLine.arguments[index + 1]
+        try? view.dataWithPDF(inside: view.bounds).write(to: URL(fileURLWithPath: path))
+    }
     private func findViews(in view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap { findViews(in: $0) }
     }
@@ -256,7 +281,34 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
 }
 
 // Read-only protocol smoke test; never performs login or inference.
-if CommandLine.arguments.contains("--command-code-probe"),
+if CommandLine.arguments.contains("--claude-probe") {
+    let service = CommandLine.arguments.firstIndex(of: "--keychain").flatMap { index in
+        CommandLine.arguments.count > index + 1 ? CommandLine.arguments[index + 1] : nil
+    } ?? ClaudeCodeClient.defaultKeychainService
+    let file = CommandLine.arguments.firstIndex(of: "--credentials").flatMap { index in
+        CommandLine.arguments.count > index + 1 ? CommandLine.arguments[index + 1] : nil
+    } ?? ClaudeCodeConfiguration.defaultCredentialsFile
+    let semaphore = DispatchSemaphore(value: 0)
+    Task.detached {
+        defer { semaphore.signal() }
+        do {
+            let configuration = ClaudeCodeConfiguration(enabled: true, useKeychain: true, keychainService: service, credentialsFile: file)
+            let snapshot = try await ClaudeCodeClient.shared.read(configuration: configuration)
+            print("Claude Code account connected; usage response decoded. Identity not printed.")
+            print("Plan: \(snapshot.planName ?? "unknown")")
+            print("5-hour remaining: \(snapshot.fiveHour?.remaining.map(String.init) ?? "unavailable")")
+            print("Weekly remaining: \(snapshot.weekly?.remaining.map(String.init) ?? "unavailable")")
+            exit(0)
+        } catch let failure as ClaudeCodeFailure {
+            fputs("\(failure.localizedDescription)\n", stderr)
+            exit(failure.isTransient ? 2 : 1)
+        } catch {
+            fputs("\(error.localizedDescription)\n", stderr)
+            exit(1)
+        }
+    }
+    semaphore.wait()
+} else if CommandLine.arguments.contains("--command-code-probe"),
    let index = CommandLine.arguments.firstIndex(of: "--auth"), CommandLine.arguments.count > index + 1 {
     let authFile = CommandLine.arguments[index + 1]
     let semaphore = DispatchSemaphore(value: 0)

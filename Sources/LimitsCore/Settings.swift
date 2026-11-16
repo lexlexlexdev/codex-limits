@@ -53,13 +53,67 @@ public struct CommandCodeConfiguration: Codable, Equatable, Sendable {
     }
 }
 
+public struct ClaudeCodeConfiguration: Codable, Equatable, Sendable {
+    public static let defaultCredentialsFile = "~/.claude/.credentials.json"
+    public var enabled: Bool
+    public var useKeychain: Bool
+    public var keychainService: String
+    public var credentialsFile: String
+    public init(
+        enabled: Bool = false,
+        useKeychain: Bool = true,
+        keychainService: String = ClaudeCodeClient.defaultKeychainService,
+        credentialsFile: String = ClaudeCodeConfiguration.defaultCredentialsFile
+    ) {
+        self.enabled = enabled; self.useKeychain = useKeychain
+        self.keychainService = keychainService; self.credentialsFile = credentialsFile
+    }
+    public var expandedCredentialsFile: String {
+        URL(fileURLWithPath: (credentialsFile as NSString).expandingTildeInPath).standardizedFileURL.path
+    }
+    public var hasCredentialsFile: Bool {
+        let path = expandedCredentialsFile
+        guard !path.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: path)
+    }
+    public static func defaultCredentialsExist() -> Bool {
+        let path = URL(fileURLWithPath: (defaultCredentialsFile as NSString).expandingTildeInPath).standardizedFileURL.path
+        return FileManager.default.fileExists(atPath: path)
+    }
+    // Whether a credential source is configured. It does not prove the source holds a
+    // usable token: the first read reports a missing, empty, or expired sign-in, and that
+    // state is what the card shows. Checking the keychain here would spawn a process per render.
+    public var hasCredential: Bool {
+        if let token = ProcessInfo.processInfo.environment["CLAUDE_CODE_OAUTH_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
+            return true
+        }
+        return hasCredentialsFile || useKeychain
+    }
+    // Enabled by default when Claude Code has already signed in, matching how Command Code
+    // is discovered. Attribute-only lookup: it never reads the secret and runs once per
+    // settings load, not per render.
+    public static func defaultAvailable() -> Bool {
+        defaultCredentialsExist() || KeychainCredential.exists(service: ClaudeCodeClient.defaultKeychainService)
+    }
+    public func validate() throws {
+        guard useKeychain || !credentialsFile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ClientFailure.configuration("Choose a Claude Code credentials file or enable the keychain lookup.")
+        }
+        guard useKeychain || credentialsFile.hasPrefix("/") || credentialsFile.hasPrefix("~/") else {
+            throw ClientFailure.configuration("Claude Code credentials file must use an absolute or ~/ path.")
+        }
+    }
+}
+
 public struct Settings: Codable, Sendable {
     public var accounts: [AccountConfiguration]
     public var codexPath: String
     public var refreshMinutes: Int
     public var commandCode: CommandCodeConfiguration
+    public var claudeCode: ClaudeCodeConfiguration
+    public var menuBar: MenuBarPreferences
     public init(root: URL, codexPath: String) {
-        if codexPath.isEmpty && CommandCodeConfiguration.defaultAuthExists() {
+        if codexPath.isEmpty && (CommandCodeConfiguration.defaultAuthExists() || ClaudeCodeConfiguration.defaultAvailable()) {
             accounts = []
         } else {
             accounts = [AccountConfiguration(slot: "A", name: "Personal", home: root.appendingPathComponent("Accounts/A").path),
@@ -67,8 +121,10 @@ public struct Settings: Codable, Sendable {
         }
         self.codexPath = codexPath; refreshMinutes = 5
         commandCode = CommandCodeConfiguration(enabled: CommandCodeConfiguration.defaultAuthExists())
+        claudeCode = ClaudeCodeConfiguration(enabled: ClaudeCodeConfiguration.defaultAvailable())
+        menuBar = MenuBarPreferences()
     }
-    enum CodingKeys: String, CodingKey { case accounts, codexPath, refreshMinutes, commandCode }
+    enum CodingKeys: String, CodingKey { case accounts, codexPath, refreshMinutes, commandCode, claudeCode, menuBar }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         accounts = try values.decode([AccountConfiguration].self, forKey: .accounts)
@@ -76,6 +132,9 @@ public struct Settings: Codable, Sendable {
         refreshMinutes = try values.decode(Int.self, forKey: .refreshMinutes)
         commandCode = try values.decodeIfPresent(CommandCodeConfiguration.self, forKey: .commandCode)
             ?? CommandCodeConfiguration(enabled: CommandCodeConfiguration.defaultAuthExists())
+        claudeCode = try values.decodeIfPresent(ClaudeCodeConfiguration.self, forKey: .claudeCode)
+            ?? ClaudeCodeConfiguration(enabled: ClaudeCodeConfiguration.defaultAvailable())
+        menuBar = (try values.decodeIfPresent(MenuBarPreferences.self, forKey: .menuBar) ?? MenuBarPreferences()).clamped()
     }
     public func validate() throws {
         try validateAccountSlots()
@@ -91,6 +150,17 @@ public struct Settings: Codable, Sendable {
             }
         }
         if commandCode.enabled { try commandCode.validate() }
+        if claudeCode.enabled { try claudeCode.validate() }
+        try validateMenuBar()
+    }
+    public func validateMenuBar() throws {
+        guard MenuBarPreferences.accountRange.contains(menuBar.maxCodexAccounts) else {
+            throw ClientFailure.configuration("Menu bar account count must be 1–8.")
+        }
+        let slots = Set(accounts.map(\.slot))
+        guard Set(menuBar.hiddenCodexSlots).isSubset(of: slots) else {
+            throw ClientFailure.configuration("Menu bar hides accounts that are no longer configured.")
+        }
     }
     public func validateAccountSlots() throws {
         guard Set(accounts.map(\.slot)).count == accounts.count,

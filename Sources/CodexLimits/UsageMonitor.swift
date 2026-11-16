@@ -18,10 +18,17 @@ final class UsageMonitor {
         var notConnected = false
         var retry = RetryState()
     }
+    struct ClaudeCodeState {
+        var snapshot: ClaudeCodeSnapshot?
+        var error: String?
+        var notConnected = false
+        var retry = RetryState()
+    }
     var settings: Settings
     let store: SettingsStore
     var states: [String: State]
     var commandCode = CommandCodeState()
+    var claudeCode = ClaudeCodeState()
     var onChange: (() -> Void)?
     private let worker = DispatchQueue(label: "CodexLimits.rpc", qos: .utility)
     private let network = NWPathMonitor()
@@ -50,7 +57,7 @@ final class UsageMonitor {
         network.start(queue: DispatchQueue(label: "CodexLimits.network", qos: .utility))
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.sleeping = true; self?.timer?.invalidate(); CodexClient.cancelAll(); CommandCodeClient.cancelAll() }
+            Task { @MainActor in self?.sleeping = true; self?.timer?.invalidate(); CodexClient.cancelAll(); CommandCodeClient.cancelAll(); ClaudeCodeClient.cancelAll() }
         })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.sleeping = false; self?.refreshIfStale(); self?.schedule() }
@@ -64,11 +71,54 @@ final class UsageMonitor {
         states.values.filter { $0.snapshot != nil && $0.error == nil }.count
     }
     var commandCodeConnected: Bool { commandCode.snapshot != nil && commandCode.error == nil }
+    var claudeCodeConnected: Bool { claudeCode.snapshot != nil && claudeCode.error == nil }
+    // Single source of truth for the menu bar title, used by the status item and both previews.
+    func menuBarTitle() -> MenuBarTitle {
+        let codex = settings.accounts.map { account -> CodexMenuBarState in
+            let state = states[account.slot]!
+            let usage = state.snapshot?.usage.codex
+            return CodexMenuBarState(slot: account.slot, state: ProviderMenuBarState(
+                fiveHour: usage?.fiveHour?.remaining,
+                weekly: usage?.weekly?.remaining,
+                failed: state.error != nil
+            ))
+        }
+        var commandCodeState: ProviderMenuBarState?
+        if settings.commandCode.enabled {
+            let state = commandCode
+            commandCodeState = ProviderMenuBarState(
+                fiveHour: state.snapshot?.windowLimits?.fiveHour?.remaining,
+                weekly: state.snapshot?.windowLimits?.weekly?.remaining,
+                fallback: state.snapshot?.monthlyRemainingPercent,
+                failed: state.error != nil
+            )
+        }
+        var claudeState: ProviderMenuBarState?
+        if settings.claudeCode.enabled {
+            let state = claudeCode
+            claudeState = ProviderMenuBarState(
+                fiveHour: state.snapshot?.fiveHour?.remaining,
+                weekly: state.snapshot?.weekly?.remaining,
+                failed: state.error != nil
+            )
+        }
+        let preferences = settings.menuBar
+        return MenuBarText.compose(
+            MenuBarText.entries(codex: codex, commandCode: commandCodeState, claude: claudeState, preferences: preferences),
+            preferences: preferences
+        )
+    }
     private func commandCodeDue(now: Date = Date()) -> Bool {
         guard settings.commandCode.enabled else { return false }
         if commandCode.error != nil { return commandCode.retry.due(now: now) }
         if commandCode.notConnected { return true }
         return commandCode.snapshot.map { now.timeIntervalSince($0.fetchedAt) >= interval } ?? true
+    }
+    private func claudeCodeDue(now: Date = Date()) -> Bool {
+        guard settings.claudeCode.enabled else { return false }
+        if claudeCode.error != nil { return claudeCode.retry.due(now: now) }
+        if claudeCode.notConnected { return true }
+        return claudeCode.snapshot.map { now.timeIntervalSince($0.fetchedAt) >= interval } ?? true
     }
     func start() { refresh(manual: true) }
     func apply(_ newSettings: Settings) throws {
@@ -79,12 +129,13 @@ final class UsageMonitor {
         settings = newSettings; generation += 1
         states = Dictionary(uniqueKeysWithValues: settings.accounts.map { ($0.slot, State()) })
         commandCode = CommandCodeState()
+        claudeCode = ClaudeCodeState()
         refresh(manual: true)
     }
     func refreshIfStale() {
         let now = Date()
         if states.values.contains(where: { $0.snapshot.map { now.timeIntervalSince($0.fetchedAt) >= interval } ?? true })
-            || commandCodeDue(now: now) {
+            || commandCodeDue(now: now) || claudeCodeDue(now: now) {
             refresh(manual: false)
         }
     }
@@ -93,6 +144,7 @@ final class UsageMonitor {
         do { try settings.validate() } catch {
             for account in settings.accounts { states[account.slot]?.error = error.localizedDescription }
             if settings.commandCode.enabled { commandCode.error = error.localizedDescription }
+            if settings.claudeCode.enabled { claudeCode.error = error.localizedDescription }
             timer?.invalidate(); onChange?(); return
         }
         let now = Date()
@@ -104,7 +156,8 @@ final class UsageMonitor {
             return state.snapshot.map { now.timeIntervalSince($0.fetchedAt) >= interval } ?? true
         }
         let shouldRefreshCommandCode = settings.commandCode.enabled && (manual || commandCodeDue(now: now))
-        guard !accounts.isEmpty || shouldRefreshCommandCode else { schedule(); return }
+        let shouldRefreshClaudeCode = settings.claudeCode.enabled && (manual || claudeCodeDue(now: now))
+        guard !accounts.isEmpty || shouldRefreshCommandCode || shouldRefreshClaudeCode else { schedule(); return }
         inFlight = true; timer?.invalidate(); onChange?()
         let executable = settings.codexPath, version = generation
         Task {
@@ -131,8 +184,39 @@ final class UsageMonitor {
                 onChange?()
             }
             if shouldRefreshCommandCode, version == generation { await refreshCommandCode(version: version) }
+            if shouldRefreshClaudeCode, version == generation { await refreshClaudeCode(version: version) }
             inFlight = false; schedule(); onChange?()
         }
+    }
+    private func refreshClaudeCode(version: Int) async {
+        let configuration = settings.claudeCode
+        guard configuration.enabled else { return }
+        do {
+            let snapshot = try await ClaudeCodeClient().read(configuration: configuration)
+            guard version == generation, settings.claudeCode == configuration else { return }
+            claudeCode.snapshot = snapshot
+            claudeCode.error = nil
+            claudeCode.notConnected = false
+            claudeCode.retry.succeeded()
+        } catch let failure as ClaudeCodeFailure {
+            guard version == generation, settings.claudeCode == configuration else { return }
+            if case .notConnected = failure {
+                claudeCode.snapshot = nil
+                claudeCode.error = nil
+                claudeCode.notConnected = true
+                claudeCode.retry.succeeded()
+            } else {
+                claudeCode.error = failure.localizedDescription
+                claudeCode.notConnected = false
+                claudeCode.retry.failed(isTransient: failure.isTransient, now: Date(), interval: interval)
+            }
+        } catch {
+            guard version == generation, settings.claudeCode == configuration else { return }
+            claudeCode.error = error.localizedDescription
+            claudeCode.notConnected = false
+            claudeCode.retry.failed(isTransient: false, now: Date(), interval: interval)
+        }
+        onChange?()
     }
     private func refreshCommandCode(version: Int) async {
         let configuration = settings.commandCode
@@ -284,6 +368,15 @@ final class UsageMonitor {
                 allDates.append(commandCode.snapshot?.fetchedAt.addingTimeInterval(interval) ?? Date())
             }
         }
+        if settings.claudeCode.enabled {
+            if claudeCode.error != nil {
+                allDates.append(claudeCode.retry.nextAttempt ?? .distantFuture)
+            } else if claudeCode.notConnected {
+                allDates.append(Date().addingTimeInterval(interval))
+            } else {
+                allDates.append(claudeCode.snapshot?.fetchedAt.addingTimeInterval(interval) ?? Date())
+            }
+        }
         guard let date = allDates.min(), date != .distantFuture else { return }
         let timer = Timer(timeInterval: max(1, date.timeIntervalSinceNow), repeats: false) { [weak self] _ in
             Task { @MainActor in self?.refresh(manual: false) }
@@ -295,6 +388,7 @@ final class UsageMonitor {
         timer?.invalidate(); network.cancel()
         CodexClient.cancelAll()
         CommandCodeClient.cancelAll()
+        ClaudeCodeClient.cancelAll()
         for observer in observers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
     }
 }

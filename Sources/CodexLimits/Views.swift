@@ -35,6 +35,39 @@ enum UI {
     }
 }
 
+// Renders the exact menu bar title the status item currently shows, on a menu
+// bar–colored strip, so the effect of each display option is visible before saving.
+@MainActor
+final class MenuBarPreviewView: NSView {
+    let title: String
+    init(title: String) {
+        self.title = title
+        super.init(frame: .zero)
+        identifier = NSUserInterfaceItemIdentifier("menu-bar-preview")
+        heightAnchor.constraint(equalToConstant: 34).isActive = true
+        widthAnchor.constraint(equalToConstant: 312).isActive = true
+        setAccessibilityElement(true)
+        setAccessibilityLabel("Menu bar preview: \(title)")
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func draw(_ dirtyRect: NSRect) {
+        let strip = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        NSColor.quaternaryLabelColor.withAlphaComponent(0.35).setFill()
+        strip.fill()
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.labelColor
+        ]
+        let text = title as NSString
+        let size = text.size(withAttributes: attributes)
+        let clip = NSRect(x: 10, y: (bounds.height - size.height) / 2, width: max(0, bounds.width - 20), height: size.height)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: clip).addClip()
+        text.draw(at: NSPoint(x: clip.minX, y: clip.minY), withAttributes: attributes)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
 @MainActor
 final class AllowanceBar: NSView {
     let remaining: Int?
@@ -265,6 +298,98 @@ final class CommandCodeView: NSStackView {
             addDetail("Weekly resets \(DisplayTime.absolute(date))")
         }
     }
+
+    private func addDetail(_ text: String) {
+        let label = UI.label(text, size: 10, color: .secondaryLabelColor)
+        label.preferredMaxLayoutWidth = 312
+        addArrangedSubview(label)
+    }
+
+    private static func money(_ value: Double) -> String {
+        String(format: "$%.2f", value)
+    }
+}
+
+@MainActor
+final class ClaudeCodeView: NSStackView {
+    init(configuration: ClaudeCodeConfiguration, state: UsageMonitor.ClaudeCodeState, target: AnyObject, openAction: Selector) {
+        super.init(frame: .zero)
+        orientation = .vertical; alignment = .leading; spacing = 8
+        widthAnchor.constraint(equalToConstant: 312).isActive = true
+        identifier = NSUserInterfaceItemIdentifier("claude-code")
+        let stale = state.error != nil
+        let notConnected = state.notConnected || (state.snapshot == nil && state.error == nil && !configuration.hasCredential)
+        let status: String
+        if stale { status = "Needs attention" }
+        else if state.snapshot != nil { status = "Connected" }
+        else if notConnected { status = "Not connected" }
+        else { status = "Checking…" }
+        let snapshot = state.snapshot
+        let header = UI.stack([UI.label("Claude Code", size: 13, weight: .semibold), UI.spacer()], vertical: false)
+        if let plan = snapshot?.planName {
+            header.addArrangedSubview(UI.label(plan, size: 10, color: .secondaryLabelColor))
+        }
+        header.addArrangedSubview(UI.label(status, size: 10, color: stale ? .systemOrange : .secondaryLabelColor))
+        addArrangedSubview(header)
+        if let snapshot {
+            let windows: [(String, ClaudeWindow)] = [
+                ("5-hour", snapshot.fiveHour), ("Weekly", snapshot.weekly),
+                ("Weekly Opus", snapshot.weeklyOpus), ("Weekly Sonnet", snapshot.weeklySonnet)
+            ].compactMap { title, window in window.map { (title, $0) } }
+            if windows.isEmpty {
+                addDetail("No 5-hour or weekly windows reported for this plan")
+            }
+            for (title, window) in windows {
+                let titleView = UI.label(title, size: 11)
+                titleView.widthAnchor.constraint(equalToConstant: 72).isActive = true
+                let number = UI.label(window.remaining.map { "\($0)%" } ?? "—", size: 12, weight: .medium)
+                number.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+                let row = UI.stack([titleView, AllowanceBar(remaining: window.remaining), UI.spacer(), number], vertical: false)
+                row.widthAnchor.constraint(equalToConstant: 312).isActive = true
+                addArrangedSubview(row)
+                if let date = window.resetsAt {
+                    if date <= Date() {
+                        addDetail("\(title) window ended · awaiting server update")
+                    } else if title == "5-hour" {
+                        addDetail("5h resets in \(DisplayTime.relative(until: date))")
+                    } else {
+                        addDetail("\(title) resets \(DisplayTime.absolute(date))")
+                    }
+                } else {
+                    addDetail("\(title) reset time unavailable")
+                }
+            }
+            if let extra = snapshot.extraUsage, extra.configured {
+                let used = extra.usedCredits.map { Self.money($0) }
+                let limit = extra.monthlyLimit.map { Self.money($0) }
+                switch (used, limit) {
+                case let (used?, limit?): addDetail("Extra usage · \(used) of \(limit) this month")
+                case let (used?, nil): addDetail("Extra usage · \(used) this month")
+                case let (nil, limit?): addDetail("Extra usage · \(limit) monthly limit")
+                default: addDetail("Extra usage enabled")
+                }
+            }
+        } else {
+            let explanation = notConnected
+                ? "Not signed in. Run `claude` and sign in with a Claude subscription, then refresh."
+                : state.error ?? "Usage is being checked."
+            let label = UI.label(explanation, size: 10, color: notConnected ? .secondaryLabelColor : .systemOrange)
+            label.preferredMaxLayoutWidth = 312
+            addArrangedSubview(label)
+            addDetail("Reads Claude Code’s saved sign-in read-only; it never refreshes or rewrites the token.")
+        }
+        if let error = state.error, snapshot != nil {
+            let label = UI.label(error + " Last successful data shown.", size: 10, color: .systemOrange)
+            label.preferredMaxLayoutWidth = 312
+            addArrangedSubview(label)
+        }
+        let link = UI.button("Claude usage ↗", target: target, action: openAction)
+        link.setAccessibilityLabel("Open Claude account usage")
+        addArrangedSubview(UI.stack([UI.spacer(), link], vertical: false))
+        setAccessibilityLabel("Claude Code, \(status)")
+        for child in arrangedSubviews { child.widthAnchor.constraint(equalTo: widthAnchor).isActive = true }
+    }
+    required init?(coder: NSCoder) { fatalError() }
 
     private func addDetail(_ text: String) {
         let label = UI.label(text, size: 10, color: .secondaryLabelColor)
