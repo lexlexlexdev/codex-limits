@@ -250,6 +250,18 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
                               updatedPreview.title != beforeLabels else {
                             fputs("UI smoke: menu bar preview did not update when labels were toggled\n", stderr); exit(1)
                         }
+                        guard let commandLabelField = documentViews.compactMap({ $0 as? NSTextField })
+                                  .first(where: { $0.identifier?.rawValue == "menu-bar-label-command-code" }) else {
+                            fputs("UI smoke: Command Code menu bar label field is missing\n", stderr); exit(1)
+                        }
+                        // Turn labels back on so the renamed provider is actually visible.
+                        buttons.first(where: { $0.title == "Show provider labels" })?.performClick(nil)
+                        commandLabelField.stringValue = "renamed"
+                        commandLabelField.sendAction(commandLabelField.action, to: commandLabelField.target)
+                        guard let renamedPreview = findViews(in: settingsDocument).compactMap({ $0 as? MenuBarPreviewView }).first,
+                              renamedPreview.title.contains("renamed:") else {
+                            fputs("UI smoke: renaming a provider did not update the preview: \(findViews(in: settingsDocument).compactMap({ $0 as? MenuBarPreviewView }).first?.title ?? "none")\n", stderr); exit(1)
+                        }
                         add.performClick(nil)
                         let loginButtons = findViews(in: content).compactMap { $0 as? NSButton }.filter { $0.title == "Sign in…" }
                         guard loginButtons.count == monitor.settings.accounts.count + 1, loginButtons.last?.isEnabled == false else {

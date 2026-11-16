@@ -37,15 +37,21 @@ enum UI {
 
 // Renders the exact menu bar title the status item currently shows, on a menu
 // bar–colored strip, so the effect of each display option is visible before saving.
+// Scroll documents anchor their content at the top only when flipped.
+@MainActor
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 @MainActor
 final class MenuBarPreviewView: NSView {
     let title: String
-    init(title: String) {
+    init(title: String, width: CGFloat = 312) {
         self.title = title
         super.init(frame: .zero)
         identifier = NSUserInterfaceItemIdentifier("menu-bar-preview")
-        heightAnchor.constraint(equalToConstant: 34).isActive = true
-        widthAnchor.constraint(equalToConstant: 312).isActive = true
+        heightAnchor.constraint(equalToConstant: 30).isActive = true
+        widthAnchor.constraint(equalToConstant: width).isActive = true
         setAccessibilityElement(true)
         setAccessibilityLabel("Menu bar preview: \(title)")
     }
@@ -106,14 +112,18 @@ final class ResetButton: NSButton {
 
 @MainActor
 final class AccountView: NSStackView {
-    init(configuration: AccountConfiguration, state: UsageMonitor.State, expanded: Bool, canRedeem: Bool, toggleTarget: AnyObject, toggleAction: Selector, redeemAction: Selector) {
+    init(configuration: AccountConfiguration, state: UsageMonitor.State, expanded: Bool, canRedeem: Bool, label: String? = nil, toggleTarget: AnyObject, toggleAction: Selector, redeemAction: Selector) {
         super.init(frame: .zero)
         orientation = .vertical; alignment = .leading; spacing = 8
         widthAnchor.constraint(equalToConstant: 312).isActive = true
         let stale = state.error != nil
         let status = state.resetInProgress ? "Reset pending…" : state.loginInProgress ? "Signing in…" : stale ? "Needs attention" : state.snapshot != nil ? "Connected" : "Not connected"
+        let badge = UI.label(label ?? configuration.slot, size: 13, weight: .bold, color: .controlAccentColor)
+        if let label, label != configuration.slot {
+            badge.toolTip = "Account \(configuration.slot)"
+        }
         addArrangedSubview(UI.stack([
-            UI.label(configuration.slot, size: 13, weight: .bold, color: .controlAccentColor),
+            badge,
             UI.label(configuration.name, size: 13, weight: .semibold), UI.spacer(),
             UI.label(status, size: 10, color: stale ? .systemOrange : .secondaryLabelColor)
         ], vertical: false))
@@ -196,7 +206,7 @@ final class AccountView: NSStackView {
 
 @MainActor
 final class CommandCodeView: NSStackView {
-    init(configuration: CommandCodeConfiguration, state: UsageMonitor.CommandCodeState, target: AnyObject, openAction: Selector) {
+    init(configuration: CommandCodeConfiguration, state: UsageMonitor.CommandCodeState, label: String = "Command Code", target: AnyObject, openAction: Selector) {
         super.init(frame: .zero)
         orientation = .vertical; alignment = .leading; spacing = 8
         widthAnchor.constraint(equalToConstant: 312).isActive = true
@@ -209,7 +219,7 @@ final class CommandCodeView: NSStackView {
         else if notConnected { status = "Not connected" }
         else { status = "Checking…" }
         let snapshot = state.snapshot
-        let header = UI.stack([UI.label("Command Code", size: 13, weight: .semibold), UI.spacer()], vertical: false)
+        let header = UI.stack([UI.label(label, size: 13, weight: .semibold), UI.spacer()], vertical: false)
         if let plan = snapshot?.planName, !plan.isEmpty {
             header.addArrangedSubview(UI.label(plan, size: 10, color: .secondaryLabelColor))
         }
@@ -312,7 +322,7 @@ final class CommandCodeView: NSStackView {
 
 @MainActor
 final class ClaudeCodeView: NSStackView {
-    init(configuration: ClaudeCodeConfiguration, state: UsageMonitor.ClaudeCodeState, target: AnyObject, openAction: Selector) {
+    init(configuration: ClaudeCodeConfiguration, state: UsageMonitor.ClaudeCodeState, label: String = "Claude Code", target: AnyObject, openAction: Selector) {
         super.init(frame: .zero)
         orientation = .vertical; alignment = .leading; spacing = 8
         widthAnchor.constraint(equalToConstant: 312).isActive = true
@@ -325,7 +335,7 @@ final class ClaudeCodeView: NSStackView {
         else if notConnected { status = "Not connected" }
         else { status = "Checking…" }
         let snapshot = state.snapshot
-        let header = UI.stack([UI.label("Claude Code", size: 13, weight: .semibold), UI.spacer()], vertical: false)
+        let header = UI.stack([UI.label(label, size: 13, weight: .semibold), UI.spacer()], vertical: false)
         if let plan = snapshot?.planName {
             header.addArrangedSubview(UI.label(plan, size: 10, color: .secondaryLabelColor))
         }

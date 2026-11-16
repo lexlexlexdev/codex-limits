@@ -15,5 +15,11 @@ public struct RetryState: Sendable {
         let delay = failures <= 3 ? min(interval, 30 * pow(2, Double(failures - 1))) : interval
         nextAttempt = now.addingTimeInterval(delay)
     }
+    // For credentials owned by another CLI (auth.json, keychain): a rejection is not final,
+    // because the user can fix it outside this app. Retry on the ordinary interval only.
+    public mutating func awaitingCredential(now: Date, interval: TimeInterval) {
+        failures += 1
+        nextAttempt = now.addingTimeInterval(max(30, interval))
+    }
     public func due(now: Date) -> Bool { nextAttempt.map { now >= $0 } ?? true }
 }

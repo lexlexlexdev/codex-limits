@@ -161,6 +161,13 @@ public struct Settings: Codable, Sendable {
         guard Set(menuBar.hiddenCodexSlots).isSubset(of: slots) else {
             throw ClientFailure.configuration("Menu bar hides accounts that are no longer configured.")
         }
+        guard Set(menuBar.accountLabels.keys).isSubset(of: slots) else {
+            throw ClientFailure.configuration("Menu bar labels refer to accounts that are no longer configured.")
+        }
+        let labels = menuBar.accountLabels.values + [menuBar.commandCodeLabel, menuBar.claudeCodeLabel]
+        guard labels.allSatisfy({ $0.trimmingCharacters(in: .whitespacesAndNewlines).count <= 12 }) else {
+            throw ClientFailure.configuration("Menu bar labels must be 12 characters or fewer.")
+        }
     }
     public func validateAccountSlots() throws {
         guard Set(accounts.map(\.slot)).count == accounts.count,

@@ -79,13 +79,13 @@ Command Code support uses the HTTP endpoints the Command Code CLI uses (package 
 - `GET /alpha/billing/credits?orgId=…`
 - `GET /alpha/billing/subscriptions?orgId=…`
 - `GET /alpha/usage/summary?orgId=…&since=…`
-- Header: `Authorization: Bearer <key>`. The key comes from `COMMAND_CODE_API_KEY` or `~/.commandcode/auth.json`.
+- Header: `Authorization: Bearer <key>`. The key comes from `~/.commandcode/auth.json`; `COMMAND_CODE_API_KEY` is used only when that file does not exist, so a stale exported key cannot shadow a working `cmd login`.
 
 The credits response provides `credits.{monthlyCredits,purchasedCredits,freeCredits,planId}`, `windowLimits.{limited,fiveHour,weekly}.{used,cap,resetAt}`, and optional sandbox fields. `resetAt` is in milliseconds. Subscription `data.{planId,status,currentPeriodStart,currentPeriodEnd}` and summary `totalCost`/`totalCount` supply renewal and spend context. These projections were extracted from the CLI bundle; no public API schema guarantees them.
 
-The app derives remaining window percentages as `1 − used/cap`. Monthly remaining uses the plan’s monthly allowance when the subscription is active, otherwise `totalCost + remaining`; missing credits, caps, or dates are shown as unavailable. The key is held in memory for the request, never written back, logged, or included in errors. The app makes no Command Code model requests and no purchase/reset calls. A missing `auth.json` is a distinct not-connected state; a 401/403 stops automatic retries until the user signs in again.
+The app derives remaining window percentages as `1 − used/cap`. Monthly remaining uses the plan’s monthly allowance when the subscription is active, otherwise `totalCost + remaining`; missing credits, caps, or dates are shown as unavailable. The key is held in memory for the request, never written back, logged, or included in errors. The app makes no Command Code model requests and no purchase/reset calls. A missing `auth.json` is a distinct not-connected state. A 401/403 is retried on the ordinary polling interval rather than stopping permanently, because `cmd login` can fix the credential while the app runs; only Codex accounts keep the “requires interactive sign-in” sticky failure.
 
-Menu bar output is not provider-specific: `MenuBarText` composes segments from a per-provider state (`fiveHour`, `weekly`, optional monthly `fallback`, `failed`) and one `MenuBarPreferences` value. The status item and both previews call the same function, so the preview cannot drift from the real title. Unknown windows render as `—`; the error marker is advisory and never changes a number.
+Menu bar output is not provider-specific: `MenuBarText` composes segments from a per-provider state (`fiveHour`, `weekly`, optional monthly `fallback`, `failed`) and one `MenuBarPreferences` value. Labels are user-editable (`accountLabels` keyed by slot, plus `commandCodeLabel`/`claudeCodeLabel`, default `cmd`); blank or whitespace labels fall back to the slot letter or provider default, and labels are capped at 12 characters when preferences are clamped. The status item and both previews call the same function, so the preview cannot drift from the real title. Unknown windows render as `—`; the error marker is advisory and never changes a number.
 
 ## Claude Code usage reads
 

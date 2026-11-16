@@ -241,23 +241,28 @@ public final class CommandCodeClient: @unchecked Sendable {
         return formatter.date(from: string)
     }
 
-    private static func resolveToken(authFile: String, environment: [String: String]) throws -> String {
-        if let token = environment["COMMAND_CODE_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
-            return token
-        }
+    // auth.json is the CLI's own credential and wins; the environment variable is only a
+    // fallback for a machine without a saved CLI login. A stale exported key must not
+    // silently shadow a working `cmd login`.
+    static func resolveToken(authFile: String, environment: [String: String]) throws -> String {
         let trimmed = authFile.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw CommandCodeFailure.configuration("Command Code auth.json path is empty.") }
+        if trimmed.isEmpty { throw CommandCodeFailure.configuration("Command Code auth.json path is empty.") }
         guard trimmed.hasPrefix("/") || trimmed.hasPrefix("~/") else {
             throw CommandCodeFailure.configuration("Command Code auth.json must use an absolute or ~/ path.")
         }
         let path = URL(fileURLWithPath: (trimmed as NSString).expandingTildeInPath).standardizedFileURL.path
-        guard FileManager.default.fileExists(atPath: path) else { throw CommandCodeFailure.notConnected }
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let auth = try? JSONDecoder().decode(AuthFile.self, from: data),
-              let token = auth.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty else {
-            throw CommandCodeFailure.configuration("Command Code auth.json could not be read. Run `cmd login` again.")
+        if FileManager.default.fileExists(atPath: path) {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let auth = try? JSONDecoder().decode(AuthFile.self, from: data),
+                  let token = auth.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty else {
+                throw CommandCodeFailure.configuration("Command Code auth.json could not be read. Run `cmd login` again.")
+            }
+            return token
         }
-        return token
+        if let token = environment["COMMAND_CODE_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
+            return token
+        }
+        throw CommandCodeFailure.notConnected
     }
 
     private func fetch<T: Decodable>(_ path: String, query: [URLQueryItem], token: String) async throws -> T {
@@ -270,7 +275,7 @@ public final class CommandCodeClient: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("CodexLimits/1.5", forHTTPHeaderField: "User-Agent")
+        request.setValue("CodexLimits/1.6", forHTTPHeaderField: "User-Agent")
 
         let data: Data
         let response: URLResponse

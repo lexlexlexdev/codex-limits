@@ -83,7 +83,59 @@ final class MenuBarDisplayTests: XCTestCase {
         let preferences = MenuBarPreferences(commandCodeMetric: .both)
         let state = ProviderMenuBarState(fiveHour: nil, weekly: nil, fallback: 42)
         let entries = MenuBarText.entries(codex: [], commandCode: state, claude: nil, preferences: preferences)
-        XCTAssertEqual(MenuBarText.compose(entries, preferences: preferences).title, "◈ CC: 42%")
+        XCTAssertEqual(MenuBarText.compose(entries, preferences: preferences).title, "◈ cmd: 42%")
+    }
+
+    func testCustomLabelsReplaceSlotLettersAndProviderDefaults() {
+        let preferences = MenuBarPreferences(
+            accountLabels: ["A": "work", "B": "home"],
+            commandCodeLabel: "cmdline",
+            claudeCodeLabel: "opus"
+        )
+        let entries = MenuBarText.entries(
+            codex: [codex("A", fiveHour: 74, weekly: 52), codex("B", fiveHour: 20, weekly: 30)],
+            commandCode: ProviderMenuBarState(fiveHour: 11),
+            claude: ProviderMenuBarState(fiveHour: 22),
+            preferences: preferences
+        )
+        XCTAssertEqual(MenuBarText.compose(entries, preferences: preferences).title, "◈ work: 74% · home: 20% · cmdline: 11% · opus: 22%")
+    }
+
+    func testBlankAndOverlongLabelsFallBackToSafeText() {
+        let preferences = MenuBarPreferences(
+            accountLabels: ["A": "   ", "B": "a-very-long-label-name"],
+            commandCodeLabel: "",
+            claudeCodeLabel: "   "
+        )
+        XCTAssertEqual(preferences.accountLabel("A"), "A", "A blank label keeps the slot letter.")
+        XCTAssertEqual(preferences.accountLabel("B").count, 12, "Labels are capped so the item stays readable.")
+        let clamped = preferences.clamped()
+        XCTAssertEqual(clamped.commandCodeLabel, "cmd")
+        XCTAssertEqual(clamped.claudeCodeLabel, "Claude")
+    }
+
+    func testLabelsSurviveSettingsRoundTripWithoutRewriteOfAccounts() throws {
+        var settings = Settings(root: URL(fileURLWithPath: "/isolated"), codexPath: "/usr/bin/true")
+        settings.menuBar.accountLabels = ["A": "work"]
+        settings.menuBar.commandCodeLabel = "cmd2"
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(Settings.self, from: data)
+        XCTAssertEqual(decoded.menuBar.accountLabels["A"], "work")
+        XCTAssertEqual(decoded.menuBar.commandCodeLabel, "cmd2")
+        XCTAssertEqual(decoded.accounts, settings.accounts)
+    }
+
+    func testExistingSettingsWithoutLabelsStillValidate() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LabelMigration-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("A").path
+        let legacy = """
+        {"accounts":[{"slot":"A","name":"One","home":"\(home)"}],"codexPath":"/usr/bin/true","refreshMinutes":5}
+        """
+        let settings = try JSONDecoder().decode(Settings.self, from: Data(legacy.utf8))
+        XCTAssertEqual(settings.menuBar.accountLabel("A"), "A")
+        XCTAssertEqual(settings.menuBar.commandCodeLabel, "cmd")
+        XCTAssertNoThrow(try settings.validate())
     }
 
     func testEmptySelectionShowsAppNameInsteadOfBlankTitle() {
@@ -100,7 +152,7 @@ final class MenuBarDisplayTests: XCTestCase {
                                           claude: ProviderMenuBarState(fiveHour: 30, weekly: 40), preferences: preferences)
         let title = MenuBarText.compose(entries, preferences: preferences)
         XCTAssertTrue(title.toolTip.contains("A 74%"))
-        XCTAssertTrue(title.toolTip.contains("CC 10%"))
+        XCTAssertTrue(title.toolTip.contains("cmd 10%"))
         XCTAssertTrue(title.toolTip.contains("Claude 30%"))
         XCTAssertTrue(title.accessibilityLabel.contains("A: 74%"))
     }

@@ -148,6 +148,38 @@ final class CommandCodeTests: XCTestCase {
         XCTAssertNoThrow(try settings.validate())
     }
 
+    func testSavedAuthFileWinsOverStaleEnvironmentKey() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("CCAuth-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("auth.json")
+        try Data(#"{"apiKey":"  user_saved  "}"#.utf8).write(to: file)
+
+        let resolved = try CommandCodeClient.resolveToken(authFile: file.path, environment: ["COMMAND_CODE_API_KEY": "user_stale_env"])
+        XCTAssertEqual(resolved, "user_saved", "A stale exported key must not shadow a working `cmd login`.")
+    }
+
+    func testEnvironmentKeyIsUsedOnlyWithoutAuthFile() throws {
+        let missing = "/nonexistent/commandcode/auth.json"
+        XCTAssertEqual(try CommandCodeClient.resolveToken(authFile: missing, environment: ["COMMAND_CODE_API_KEY": " user_env "]), "user_env")
+        XCTAssertThrowsError(try CommandCodeClient.resolveToken(authFile: missing, environment: [:])) { error in
+            XCTAssertEqual(error as? CommandCodeFailure, .notConnected)
+        }
+    }
+
+    func testUnreadableAuthFileIsNotSilentlyReplacedByEnvironment() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("CCAuth-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("auth.json")
+        try Data(#"{"notAnApiKey":true}"#.utf8).write(to: file)
+        XCTAssertThrowsError(try CommandCodeClient.resolveToken(authFile: file.path, environment: ["COMMAND_CODE_API_KEY": "user_env"])) { error in
+            guard case .configuration = error as? CommandCodeFailure else {
+                return XCTFail("Expected a configuration failure, got \(error)")
+            }
+        }
+    }
+
     func testV1PlanNamesAndCredits() throws {
         let (whoami, credits, subscription, summary) = try responses(
             credits: """

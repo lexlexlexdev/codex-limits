@@ -208,13 +208,18 @@ final class UsageMonitor {
             } else {
                 claudeCode.error = failure.localizedDescription
                 claudeCode.notConnected = false
-                claudeCode.retry.failed(isTransient: failure.isTransient, now: Date(), interval: interval)
+                if failure.isAuthentication {
+                    // Claude Code owns the credential; it can be fixed outside this app.
+                    claudeCode.retry.awaitingCredential(now: Date(), interval: interval)
+                } else {
+                    claudeCode.retry.failed(isTransient: failure.isTransient, now: Date(), interval: interval)
+                }
             }
         } catch {
             guard version == generation, settings.claudeCode == configuration else { return }
             claudeCode.error = error.localizedDescription
             claudeCode.notConnected = false
-            claudeCode.retry.failed(isTransient: false, now: Date(), interval: interval)
+            claudeCode.retry.awaitingCredential(now: Date(), interval: interval)
         }
         onChange?()
     }
@@ -238,13 +243,18 @@ final class UsageMonitor {
             } else {
                 commandCode.error = failure.localizedDescription
                 commandCode.notConnected = false
-                commandCode.retry.failed(isTransient: failure.isTransient, now: Date(), interval: interval)
+                if failure.isAuthentication {
+                    // Command Code owns auth.json; `cmd login` can fix it while we run.
+                    commandCode.retry.awaitingCredential(now: Date(), interval: interval)
+                } else {
+                    commandCode.retry.failed(isTransient: failure.isTransient, now: Date(), interval: interval)
+                }
             }
         } catch {
             guard version == generation, settings.commandCode == configuration else { return }
             commandCode.error = error.localizedDescription
             commandCode.notConnected = false
-            commandCode.retry.failed(isTransient: false, now: Date(), interval: interval)
+            commandCode.retry.awaitingCredential(now: Date(), interval: interval)
         }
         onChange?()
     }

@@ -66,8 +66,13 @@ public struct MenuBarPreferences: Codable, Equatable, Sendable {
     public var showOverflow: Bool
     public var showErrorMarker: Bool
     public var hiddenCodexSlots: [String]
+    public var accountLabels: [String: String]
+    public var commandCodeLabel: String
+    public var claudeCodeLabel: String
 
     public static let accountRange = 1...8
+    public static let defaultCommandCodeLabel = "cmd"
+    public static let defaultClaudeCodeLabel = "Claude"
 
     public init(
         showIcon: Bool = true,
@@ -80,18 +85,24 @@ public struct MenuBarPreferences: Codable, Equatable, Sendable {
         maxCodexAccounts: Int = 3,
         showOverflow: Bool = true,
         showErrorMarker: Bool = true,
-        hiddenCodexSlots: [String] = []
+        hiddenCodexSlots: [String] = [],
+        accountLabels: [String: String] = [:],
+        commandCodeLabel: String = MenuBarPreferences.defaultCommandCodeLabel,
+        claudeCodeLabel: String = MenuBarPreferences.defaultClaudeCodeLabel
     ) {
         self.showIcon = showIcon; self.showLabels = showLabels
         self.codexMetric = codexMetric; self.commandCodeMetric = commandCodeMetric; self.claudeMetric = claudeMetric
         self.showCommandCode = showCommandCode; self.showClaudeCode = showClaudeCode
         self.maxCodexAccounts = maxCodexAccounts; self.showOverflow = showOverflow
         self.showErrorMarker = showErrorMarker; self.hiddenCodexSlots = hiddenCodexSlots
+        self.accountLabels = accountLabels; self.commandCodeLabel = commandCodeLabel
+        self.claudeCodeLabel = claudeCodeLabel
     }
 
     enum CodingKeys: String, CodingKey {
         case showIcon, showLabels, codexMetric, commandCodeMetric, claudeMetric
         case showCommandCode, showClaudeCode, maxCodexAccounts, showOverflow, showErrorMarker, hiddenCodexSlots
+        case accountLabels, commandCodeLabel, claudeCodeLabel
     }
 
     public init(from decoder: Decoder) throws {
@@ -107,12 +118,30 @@ public struct MenuBarPreferences: Codable, Equatable, Sendable {
         showOverflow = try values.decodeIfPresent(Bool.self, forKey: .showOverflow) ?? true
         showErrorMarker = try values.decodeIfPresent(Bool.self, forKey: .showErrorMarker) ?? true
         hiddenCodexSlots = try values.decodeIfPresent([String].self, forKey: .hiddenCodexSlots) ?? []
+        accountLabels = try values.decodeIfPresent([String: String].self, forKey: .accountLabels) ?? [:]
+        commandCodeLabel = try values.decodeIfPresent(String.self, forKey: .commandCodeLabel) ?? MenuBarPreferences.defaultCommandCodeLabel
+        claudeCodeLabel = try values.decodeIfPresent(String.self, forKey: .claudeCodeLabel) ?? MenuBarPreferences.defaultClaudeCodeLabel
     }
 
     public func clamped() -> MenuBarPreferences {
         var copy = self
         copy.maxCodexAccounts = min(max(Self.accountRange.lowerBound, maxCodexAccounts), Self.accountRange.upperBound)
+        // A blank label would render as ": 74%"; fall back to the account slot.
+        copy.accountLabels = accountLabels.mapValues { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.value.isEmpty }
+        copy.commandCodeLabel = Self.label(commandCodeLabel, fallback: Self.defaultCommandCodeLabel)
+        copy.claudeCodeLabel = Self.label(claudeCodeLabel, fallback: Self.defaultClaudeCodeLabel)
         return copy
+    }
+
+    public func accountLabel(_ slot: String) -> String {
+        Self.label(accountLabels[slot] ?? "", fallback: slot)
+    }
+
+    static func label(_ raw: String, fallback: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return fallback }
+        // Keep the status item readable; a label is a name, not a sentence.
+        return String(trimmed.prefix(12))
     }
 }
 
@@ -197,7 +226,7 @@ public enum MenuBarText {
             .filter { !hidden.contains($0.slot) }
             .map {
                 MenuBarEntry(
-                    label: $0.slot,
+                    label: preferences.accountLabel($0.slot),
                     fiveHour: $0.state.fiveHour,
                     weekly: $0.state.weekly,
                     metric: preferences.codexMetric,
@@ -207,10 +236,10 @@ public enum MenuBarText {
             }
         var entries = truncate(codexEntries, maximum: preferences.maxCodexAccounts, showOverflow: preferences.showOverflow)
         if preferences.showCommandCode, let commandCode {
-            entries.append(MenuBarEntry(label: "CC", fiveHour: commandCode.fiveHour, weekly: commandCode.weekly, metric: preferences.commandCodeMetric, failed: commandCode.failed, fallback: commandCode.fallback))
+            entries.append(MenuBarEntry(label: preferences.commandCodeLabel, fiveHour: commandCode.fiveHour, weekly: commandCode.weekly, metric: preferences.commandCodeMetric, failed: commandCode.failed, fallback: commandCode.fallback))
         }
         if preferences.showClaudeCode, let claude {
-            entries.append(MenuBarEntry(label: "Claude", fiveHour: claude.fiveHour, weekly: claude.weekly, metric: preferences.claudeMetric, failed: claude.failed, fallback: claude.fallback))
+            entries.append(MenuBarEntry(label: preferences.claudeCodeLabel, fiveHour: claude.fiveHour, weekly: claude.weekly, metric: preferences.claudeMetric, failed: claude.failed, fallback: claude.fallback))
         }
         return entries
     }

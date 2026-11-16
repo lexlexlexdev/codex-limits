@@ -71,14 +71,14 @@ final class PopoverController: NSViewController {
             content.addArrangedSubview(UI.label("No Codex accounts configured. Use Settings → Add Account.", color: .secondaryLabelColor))
         }
         for configuration in monitor.settings.accounts {
-            content.addArrangedSubview(AccountView(configuration: configuration, state: monitor.states[configuration.slot]!, expanded: expanded.contains(configuration.slot), canRedeem: !monitor.isBusy && !monitor.isOffline, toggleTarget: self, toggleAction: #selector(toggleResets(_:)), redeemAction: #selector(applyReset(_:))))
+            content.addArrangedSubview(AccountView(configuration: configuration, state: monitor.states[configuration.slot]!, expanded: expanded.contains(configuration.slot), canRedeem: !monitor.isBusy && !monitor.isOffline, label: monitor.settings.menuBar.accountLabel(configuration.slot), toggleTarget: self, toggleAction: #selector(toggleResets(_:)), redeemAction: #selector(applyReset(_:))))
             content.addArrangedSubview(UI.divider())
         }
         if monitor.settings.commandCode.enabled {
-            content.addArrangedSubview(CommandCodeView(configuration: monitor.settings.commandCode, state: monitor.commandCode, target: self, openAction: #selector(openCommandCode)))
+            content.addArrangedSubview(CommandCodeView(configuration: monitor.settings.commandCode, state: monitor.commandCode, label: monitor.settings.menuBar.commandCodeLabel, target: self, openAction: #selector(openCommandCode)))
         }
         if monitor.settings.claudeCode.enabled {
-            content.addArrangedSubview(ClaudeCodeView(configuration: monitor.settings.claudeCode, state: monitor.claudeCode, target: self, openAction: #selector(openClaudeCode)))
+            content.addArrangedSubview(ClaudeCodeView(configuration: monitor.settings.claudeCode, state: monitor.claudeCode, label: monitor.settings.menuBar.claudeCodeLabel, target: self, openAction: #selector(openClaudeCode)))
         }
         let last = (monitor.states.values.compactMap { $0.snapshot?.fetchedAt }
             + [monitor.commandCode.snapshot?.fetchedAt, monitor.claudeCode.snapshot?.fetchedAt].compactMap { $0 }).min()
