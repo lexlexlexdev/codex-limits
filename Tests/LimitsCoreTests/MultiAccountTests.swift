@@ -11,7 +11,6 @@ final class MultiAccountTests: XCTestCase {
         XCTAssertEqual(settings.accounts[2].slot, "C")
         XCTAssertEqual(settings.accounts[26].slot, "AA")
         XCTAssertEqual(Set(settings.accounts.map(\.canonicalHome)).count, 32)
-        XCTAssertTrue(settings.accounts.dropFirst(2).allSatisfy { !$0.autoStart })
         try settings.validate()
         let store = SettingsStore(root: root)
         try store.save(settings)
@@ -55,8 +54,9 @@ final class MultiAccountTests: XCTestCase {
         let existing = migrated.accounts
         migrated.addAccount(root: URL(fileURLWithPath: "/isolated"))
         XCTAssertEqual(Array(migrated.accounts.prefix(2)), existing)
-        XCTAssertTrue(migrated.accounts[1].autoStart)
         XCTAssertNoThrow(try migrated.validate())
+        let encoded = try JSONEncoder().encode(migrated)
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("autoStart"))
     }
     func testUserAndWorkspaceDuplicatesAreCheckedAcrossEverySlot() throws {
         func snapshot(_ email: String, _ id: String) throws -> AccountSnapshot {

@@ -18,7 +18,6 @@ final class LimitsCoreTests: XCTestCase {
         XCTAssertEqual(try usage(primary: "{\"usedPercent\":-2}").rateLimits.primary?.remaining, 100)
         XCTAssertEqual(try usage(primary: "{\"usedPercent\":110}").rateLimits.primary?.remaining, 0)
         XCTAssertEqual(try usage(primary: "{\"usedPercent\":0.4}").rateLimits.primary?.remaining, 100)
-        XCTAssertFalse(WindowInitializer.mayExecute(usage: try usage(primary: "{\"usedPercent\":0,\"windowDurationMins\":300,\"resetsAt\":1}"), enabled: true))
     }
     func testBucketSelectionDoesNotSubstitutePremium() throws {
         let snapshot = try usage(",\"rateLimitsByLimitId\":{\"premium\":{\"limitId\":\"premium\",\"primary\":null,\"secondary\":null}}")
@@ -121,16 +120,6 @@ final class LimitsCoreTests: XCTestCase {
         XCTAssertEqual(retry.failures, 0)
         retry.failed(.authentication("expired"), now: now, interval: 300)
         XCTAssertEqual(retry.nextAttempt, .distantFuture)
-    }
-    func testAutoStartRequiresCreditAndPermissionData() throws {
-        let old = try usage()
-        let bankedResetApplied = try usage(",\"rateLimitResetCredits\":{\"availableCount\":0,\"credits\":[]}", primary: "{\"usedPercent\":0,\"windowDurationMins\":300,\"resetsAt\":1900000000}")
-        let restartedSnapshot = try JSONDecoder().decode(UsageResponse.self, from: JSONEncoder().encode(bankedResetApplied))
-        for snapshot in [old, bankedResetApplied, restartedSnapshot] {
-            XCTAssertFalse(WindowInitializer.mayExecute(usage: snapshot, enabled: true))
-            XCTAssertFalse(WindowInitializer.mayExecute(usage: snapshot, enabled: false))
-        }
-        XCTAssertTrue(WindowInitializer.supported)
     }
     func testMalformedSnapshotFailsInsteadOfShowingZero() {
         XCTAssertThrowsError(try JSONDecoder().decode(UsageResponse.self, from: Data("{\"rateLimits\":{\"primary\":{}}}".utf8)))

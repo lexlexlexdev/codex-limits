@@ -5,18 +5,15 @@ public struct AccountConfiguration: Codable, Equatable, Sendable {
     public var slot: String
     public var name: String
     public var home: String
-    public var autoStart: Bool
     public init(slot: String, name: String, home: String) {
         self.slot = slot; self.name = name; self.home = home
-        autoStart = false
     }
-    enum CodingKeys: String, CodingKey { case slot, name, home, autoStart }
+    enum CodingKeys: String, CodingKey { case slot, name, home }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         slot = try values.decode(String.self, forKey: .slot)
         name = try values.decode(String.self, forKey: .name)
         home = try values.decode(String.self, forKey: .home)
-        autoStart = try values.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
     }
     public var canonicalHome: String {
         URL(fileURLWithPath: (home as NSString).expandingTildeInPath).standardizedFileURL.resolvingSymlinksInPath().path
@@ -28,14 +25,116 @@ public struct AccountConfiguration: Codable, Equatable, Sendable {
     }
 }
 
+public struct CommandCodeConfiguration: Codable, Equatable, Sendable {
+    public static let defaultAuthFile = "~/.commandcode/auth.json"
+    public var enabled: Bool
+    public var authFile: String
+    public init(enabled: Bool = false, authFile: String = CommandCodeConfiguration.defaultAuthFile) {
+        self.enabled = enabled; self.authFile = authFile
+    }
+    public var expandedAuthFile: String {
+        URL(fileURLWithPath: (authFile as NSString).expandingTildeInPath).standardizedFileURL.path
+    }
+    public static func defaultAuthExists() -> Bool {
+        let path = URL(fileURLWithPath: (defaultAuthFile as NSString).expandingTildeInPath).standardizedFileURL.path
+        return FileManager.default.fileExists(atPath: path)
+    }
+    public var hasCredential: Bool {
+        let token = ProcessInfo.processInfo.environment["COMMAND_CODE_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !token.isEmpty || FileManager.default.fileExists(atPath: expandedAuthFile)
+    }
+    public func validate() throws {
+        guard !authFile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ClientFailure.configuration("Command Code auth.json path cannot be empty.")
+        }
+        guard authFile.hasPrefix("/") || authFile.hasPrefix("~/") else {
+            throw ClientFailure.configuration("Command Code auth.json must use an absolute or ~/ path.")
+        }
+    }
+}
+
+public struct ClaudeCodeConfiguration: Codable, Equatable, Sendable {
+    public static let defaultCredentialsFile = "~/.claude/.credentials.json"
+    public var enabled: Bool
+    public var useKeychain: Bool
+    public var keychainService: String
+    public var credentialsFile: String
+    public init(
+        enabled: Bool = false,
+        useKeychain: Bool = true,
+        keychainService: String = ClaudeCodeClient.defaultKeychainService,
+        credentialsFile: String = ClaudeCodeConfiguration.defaultCredentialsFile
+    ) {
+        self.enabled = enabled; self.useKeychain = useKeychain
+        self.keychainService = keychainService; self.credentialsFile = credentialsFile
+    }
+    public var expandedCredentialsFile: String {
+        URL(fileURLWithPath: (credentialsFile as NSString).expandingTildeInPath).standardizedFileURL.path
+    }
+    public var hasCredentialsFile: Bool {
+        let path = expandedCredentialsFile
+        guard !path.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: path)
+    }
+    public static func defaultCredentialsExist() -> Bool {
+        let path = URL(fileURLWithPath: (defaultCredentialsFile as NSString).expandingTildeInPath).standardizedFileURL.path
+        return FileManager.default.fileExists(atPath: path)
+    }
+    // Whether a credential source is configured. It does not prove the source holds a
+    // usable token: the first read reports a missing, empty, or expired sign-in, and that
+    // state is what the card shows. Checking the keychain here would spawn a process per render.
+    public var hasCredential: Bool {
+        if let token = ProcessInfo.processInfo.environment["CLAUDE_CODE_OAUTH_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
+            return true
+        }
+        return hasCredentialsFile || useKeychain
+    }
+    // Enabled by default when Claude Code has already signed in, matching how Command Code
+    // is discovered. Attribute-only lookup: it never reads the secret and runs once per
+    // settings load, not per render.
+    public static func defaultAvailable() -> Bool {
+        defaultCredentialsExist() || KeychainCredential.exists(service: ClaudeCodeClient.defaultKeychainService)
+    }
+    public func validate() throws {
+        guard useKeychain || !credentialsFile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ClientFailure.configuration("Choose a Claude Code credentials file or enable the keychain lookup.")
+        }
+        guard useKeychain || credentialsFile.hasPrefix("/") || credentialsFile.hasPrefix("~/") else {
+            throw ClientFailure.configuration("Claude Code credentials file must use an absolute or ~/ path.")
+        }
+    }
+}
+
 public struct Settings: Codable, Sendable {
     public var accounts: [AccountConfiguration]
     public var codexPath: String
     public var refreshMinutes: Int
+    public var commandCode: CommandCodeConfiguration
+    public var claudeCode: ClaudeCodeConfiguration
+    public var menuBar: MenuBarPreferences
     public init(root: URL, codexPath: String) {
-        accounts = [AccountConfiguration(slot: "A", name: "Personal", home: root.appendingPathComponent("Accounts/A").path),
-                    AccountConfiguration(slot: "B", name: "Secondary", home: root.appendingPathComponent("Accounts/B").path)]
+        if codexPath.isEmpty && (CommandCodeConfiguration.defaultAuthExists() || ClaudeCodeConfiguration.defaultAvailable()) {
+            accounts = []
+        } else {
+            accounts = [AccountConfiguration(slot: "A", name: "Personal", home: root.appendingPathComponent("Accounts/A").path),
+                        AccountConfiguration(slot: "B", name: "Secondary", home: root.appendingPathComponent("Accounts/B").path)]
+        }
         self.codexPath = codexPath; refreshMinutes = 5
+        commandCode = CommandCodeConfiguration(enabled: CommandCodeConfiguration.defaultAuthExists())
+        claudeCode = ClaudeCodeConfiguration(enabled: ClaudeCodeConfiguration.defaultAvailable())
+        menuBar = MenuBarPreferences()
+    }
+    enum CodingKeys: String, CodingKey { case accounts, codexPath, refreshMinutes, commandCode, claudeCode, menuBar }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        accounts = try values.decode([AccountConfiguration].self, forKey: .accounts)
+        codexPath = try values.decode(String.self, forKey: .codexPath)
+        refreshMinutes = try values.decode(Int.self, forKey: .refreshMinutes)
+        commandCode = try values.decodeIfPresent(CommandCodeConfiguration.self, forKey: .commandCode)
+            ?? CommandCodeConfiguration(enabled: CommandCodeConfiguration.defaultAuthExists())
+        claudeCode = try values.decodeIfPresent(ClaudeCodeConfiguration.self, forKey: .claudeCode)
+            ?? ClaudeCodeConfiguration(enabled: ClaudeCodeConfiguration.defaultAvailable())
+        menuBar = (try values.decodeIfPresent(MenuBarPreferences.self, forKey: .menuBar) ?? MenuBarPreferences()).clamped()
     }
     public func validate() throws {
         try validateAccountSlots()
@@ -45,8 +144,29 @@ public struct Settings: Codable, Sendable {
             guard !account.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ClientFailure.configuration("Account names cannot be empty.") }
         }
         guard (1...60).contains(refreshMinutes) else { throw ClientFailure.configuration("Refresh interval must be 1–60 minutes.") }
-        guard codexPath.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: codexPath) else {
-            throw ClientFailure.configuration("Select an executable Codex CLI binary.")
+        if !accounts.isEmpty {
+            guard codexPath.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: codexPath) else {
+                throw ClientFailure.configuration("Select an executable Codex CLI binary.")
+            }
+        }
+        if commandCode.enabled { try commandCode.validate() }
+        if claudeCode.enabled { try claudeCode.validate() }
+        try validateMenuBar()
+    }
+    public func validateMenuBar() throws {
+        guard MenuBarPreferences.accountRange.contains(menuBar.maxCodexAccounts) else {
+            throw ClientFailure.configuration("Menu bar account count must be 1–8.")
+        }
+        let slots = Set(accounts.map(\.slot))
+        guard Set(menuBar.hiddenCodexSlots).isSubset(of: slots) else {
+            throw ClientFailure.configuration("Menu bar hides accounts that are no longer configured.")
+        }
+        guard Set(menuBar.accountLabels.keys).isSubset(of: slots) else {
+            throw ClientFailure.configuration("Menu bar labels refer to accounts that are no longer configured.")
+        }
+        let labels = menuBar.accountLabels.values + [menuBar.commandCodeLabel, menuBar.claudeCodeLabel]
+        guard labels.allSatisfy({ $0.trimmingCharacters(in: .whitespacesAndNewlines).count <= 12 }) else {
+            throw ClientFailure.configuration("Menu bar labels must be 12 characters or fewer.")
         }
     }
     public func validateAccountSlots() throws {

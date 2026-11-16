@@ -11,12 +11,24 @@ final class UsageMonitor {
         var loginInProgress = false
         var resetInProgress = false
         var resetMessage: String?
-        var autoCheckedAt: Date?
-        var autoMessage: String?
+    }
+    struct CommandCodeState {
+        var snapshot: CommandCodeSnapshot?
+        var error: String?
+        var notConnected = false
+        var retry = RetryState()
+    }
+    struct ClaudeCodeState {
+        var snapshot: ClaudeCodeSnapshot?
+        var error: String?
+        var notConnected = false
+        var retry = RetryState()
     }
     var settings: Settings
     let store: SettingsStore
     var states: [String: State]
+    var commandCode = CommandCodeState()
+    var claudeCode = ClaudeCodeState()
     var onChange: (() -> Void)?
     private let worker = DispatchQueue(label: "CodexLimits.rpc", qos: .utility)
     private let network = NWPathMonitor()
@@ -45,7 +57,7 @@ final class UsageMonitor {
         network.start(queue: DispatchQueue(label: "CodexLimits.network", qos: .utility))
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.sleeping = true; self?.timer?.invalidate(); CodexClient.cancelAll() }
+            Task { @MainActor in self?.sleeping = true; self?.timer?.invalidate(); CodexClient.cancelAll(); CommandCodeClient.cancelAll(); ClaudeCodeClient.cancelAll() }
         })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.sleeping = false; self?.refreshIfStale(); self?.schedule() }
@@ -58,19 +70,55 @@ final class UsageMonitor {
     var connectedCount: Int {
         states.values.filter { $0.snapshot != nil && $0.error == nil }.count
     }
-    private func autoDue(_ account: AccountConfiguration, now: Date = Date()) -> Bool {
-        account.autoStart && (states[account.slot]?.autoCheckedAt.map { now.timeIntervalSince($0) >= WindowInitializer.interval } ?? true)
-    }
-    func setAutoStart(slot: String, enabled: Bool) throws {
-        guard !isBusy, let index = settings.accounts.firstIndex(where: { $0.slot == slot }) else {
-            throw ClientFailure.configuration("Wait for the current operation to finish.")
+    var commandCodeConnected: Bool { commandCode.snapshot != nil && commandCode.error == nil }
+    var claudeCodeConnected: Bool { claudeCode.snapshot != nil && claudeCode.error == nil }
+    // Single source of truth for the menu bar title, used by the status item and both previews.
+    func menuBarTitle() -> MenuBarTitle {
+        let codex = settings.accounts.map { account -> CodexMenuBarState in
+            let state = states[account.slot]!
+            let usage = state.snapshot?.usage.codex
+            return CodexMenuBarState(slot: account.slot, state: ProviderMenuBarState(
+                fiveHour: usage?.fiveHour?.remaining,
+                weekly: usage?.weekly?.remaining,
+                failed: state.error != nil
+            ))
         }
-        var updated = settings
-        updated.accounts[index].autoStart = enabled
-        try store.save(updated)
-        settings = updated
-        onChange?()
-        if enabled { refresh(manual: true) } else { schedule() }
+        var commandCodeState: ProviderMenuBarState?
+        if settings.commandCode.enabled {
+            let state = commandCode
+            commandCodeState = ProviderMenuBarState(
+                fiveHour: state.snapshot?.windowLimits?.fiveHour?.remaining,
+                weekly: state.snapshot?.windowLimits?.weekly?.remaining,
+                fallback: state.snapshot?.monthlyRemainingPercent,
+                failed: state.error != nil
+            )
+        }
+        var claudeState: ProviderMenuBarState?
+        if settings.claudeCode.enabled {
+            let state = claudeCode
+            claudeState = ProviderMenuBarState(
+                fiveHour: state.snapshot?.fiveHour?.remaining,
+                weekly: state.snapshot?.weekly?.remaining,
+                failed: state.error != nil
+            )
+        }
+        let preferences = settings.menuBar
+        return MenuBarText.compose(
+            MenuBarText.entries(codex: codex, commandCode: commandCodeState, claude: claudeState, preferences: preferences),
+            preferences: preferences
+        )
+    }
+    private func commandCodeDue(now: Date = Date()) -> Bool {
+        guard settings.commandCode.enabled else { return false }
+        if commandCode.error != nil { return commandCode.retry.due(now: now) }
+        if commandCode.notConnected { return true }
+        return commandCode.snapshot.map { now.timeIntervalSince($0.fetchedAt) >= interval } ?? true
+    }
+    private func claudeCodeDue(now: Date = Date()) -> Bool {
+        guard settings.claudeCode.enabled else { return false }
+        if claudeCode.error != nil { return claudeCode.retry.due(now: now) }
+        if claudeCode.notConnected { return true }
+        return claudeCode.snapshot.map { now.timeIntervalSince($0.fetchedAt) >= interval } ?? true
     }
     func start() { refresh(manual: true) }
     func apply(_ newSettings: Settings) throws {
@@ -80,11 +128,14 @@ final class UsageMonitor {
         try store.save(newSettings)
         settings = newSettings; generation += 1
         states = Dictionary(uniqueKeysWithValues: settings.accounts.map { ($0.slot, State()) })
+        commandCode = CommandCodeState()
+        claudeCode = ClaudeCodeState()
         refresh(manual: true)
     }
     func refreshIfStale() {
         let now = Date()
-        if settings.accounts.contains(where: { autoDue($0, now: now) }) || states.values.contains(where: { $0.snapshot.map { now.timeIntervalSince($0.fetchedAt) >= interval } ?? true }) {
+        if states.values.contains(where: { $0.snapshot.map { now.timeIntervalSince($0.fetchedAt) >= interval } ?? true })
+            || commandCodeDue(now: now) || claudeCodeDue(now: now) {
             refresh(manual: false)
         }
     }
@@ -92,6 +143,8 @@ final class UsageMonitor {
         guard !isBusy, !sleeping, online else { schedule(); return }
         do { try settings.validate() } catch {
             for account in settings.accounts { states[account.slot]?.error = error.localizedDescription }
+            if settings.commandCode.enabled { commandCode.error = error.localizedDescription }
+            if settings.claudeCode.enabled { claudeCode.error = error.localizedDescription }
             timer?.invalidate(); onChange?(); return
         }
         let now = Date()
@@ -100,9 +153,11 @@ final class UsageMonitor {
             guard !state.loginInProgress else { return false }
             if manual { return true }
             if state.error != nil { return state.retry.due(now: now) }
-            return autoDue(account, now: now) || (state.snapshot.map { now.timeIntervalSince($0.fetchedAt) >= interval } ?? true)
+            return state.snapshot.map { now.timeIntervalSince($0.fetchedAt) >= interval } ?? true
         }
-        guard !accounts.isEmpty else { schedule(); return }
+        let shouldRefreshCommandCode = settings.commandCode.enabled && (manual || commandCodeDue(now: now))
+        let shouldRefreshClaudeCode = settings.claudeCode.enabled && (manual || claudeCodeDue(now: now))
+        guard !accounts.isEmpty || shouldRefreshCommandCode || shouldRefreshClaudeCode else { schedule(); return }
         inFlight = true; timer?.invalidate(); onChange?()
         let executable = settings.codexPath, version = generation
         Task {
@@ -128,54 +183,80 @@ final class UsageMonitor {
                 verifyIsolation()
                 onChange?()
             }
-            await checkAutoStart()
+            if shouldRefreshCommandCode, version == generation { await refreshCommandCode(version: version) }
+            if shouldRefreshClaudeCode, version == generation { await refreshClaudeCode(version: version) }
             inFlight = false; schedule(); onChange?()
         }
     }
-    private func checkAutoStart() async {
-        let journal = AutoStartStore(root: store.root)
-        let executable = settings.codexPath
-        for account in settings.accounts where autoDue(account) {
-            guard !sleeping, online else { return }
-            states[account.slot]?.autoCheckedAt = Date()
-            guard let state = states[account.slot], state.error == nil, let snapshot = state.snapshot,
-                  Date().timeIntervalSince(snapshot.fetchedAt) < 120 else { continue }
-            let shouldFire: Bool
-            do {
-                shouldFire = try journal.observe(account: account, snapshot: snapshot, now: Date())
-                let record = try journal.record(account: account, snapshot: snapshot)
-                states[account.slot]?.autoMessage = record?.message ?? "Waiting for the next 10-minute check"
-                if let checked = record?.checkedAt { states[account.slot]?.autoCheckedAt = checked }
-            } catch {
-                states[account.slot]?.autoMessage = "Auto-start paused: " + error.localizedDescription
-                continue
-            }
-            guard shouldFire else { onChange?(); continue }
-            states[account.slot]?.autoMessage = "Sending ok…"; onChange?()
-            let result: (String, AccountSnapshot?) = await withCheckedContinuation { continuation in
-                worker.async {
-                    autoreleasepool {
-                        var message: String
-                        do { message = try CodexClient().initializeWindow(account: account, expected: snapshot, executable: executable).message }
-                        catch { message = "Attempt failed/unknown: " + error.localizedDescription }
-                        // Read-only follow-up never feeds re-arm logic in the same cycle.
-                        let refreshed = try? CodexClient().read(account: account, executable: executable)
-                        do { try journal.finish(account: account, snapshot: snapshot, message: message) }
-                        catch { message += " Result could not be saved; the pre-saved attempt remains latched." }
-                        continuation.resume(returning: (message, refreshed))
-                    }
+    private func refreshClaudeCode(version: Int) async {
+        let configuration = settings.claudeCode
+        guard configuration.enabled else { return }
+        do {
+            let snapshot = try await ClaudeCodeClient().read(configuration: configuration)
+            guard version == generation, settings.claudeCode == configuration else { return }
+            claudeCode.snapshot = snapshot
+            claudeCode.error = nil
+            claudeCode.notConnected = false
+            claudeCode.retry.succeeded()
+        } catch let failure as ClaudeCodeFailure {
+            guard version == generation, settings.claudeCode == configuration else { return }
+            if case .notConnected = failure {
+                claudeCode.snapshot = nil
+                claudeCode.error = nil
+                claudeCode.notConnected = true
+                claudeCode.retry.succeeded()
+            } else {
+                claudeCode.error = failure.localizedDescription
+                claudeCode.notConnected = false
+                if failure.isAuthentication {
+                    // Claude Code owns the credential; it can be fixed outside this app.
+                    claudeCode.retry.awaitingCredential(now: Date(), interval: interval)
+                } else {
+                    claudeCode.retry.failed(isTransient: failure.isTransient, now: Date(), interval: interval)
                 }
             }
-            states[account.slot]?.autoMessage = result.0
-            if let refreshed = result.1 {
-                states[account.slot]?.snapshot = refreshed
-                verifyIsolation()
-            } else {
-                states[account.slot]?.error = "Auto-start follow-up usage unavailable. Last successful usage shown."
-                states[account.slot]?.retry.failed(.network, now: Date(), interval: interval)
-            }
-            onChange?()
+        } catch {
+            guard version == generation, settings.claudeCode == configuration else { return }
+            claudeCode.error = error.localizedDescription
+            claudeCode.notConnected = false
+            claudeCode.retry.awaitingCredential(now: Date(), interval: interval)
         }
+        onChange?()
+    }
+    private func refreshCommandCode(version: Int) async {
+        let configuration = settings.commandCode
+        guard configuration.enabled else { return }
+        do {
+            let snapshot = try await CommandCodeClient.shared.read(authFile: configuration.authFile)
+            guard version == generation, settings.commandCode == configuration else { return }
+            commandCode.snapshot = snapshot
+            commandCode.error = nil
+            commandCode.notConnected = false
+            commandCode.retry.succeeded()
+        } catch let failure as CommandCodeFailure {
+            guard version == generation, settings.commandCode == configuration else { return }
+            if case .notConnected = failure {
+                commandCode.snapshot = nil
+                commandCode.error = nil
+                commandCode.notConnected = true
+                commandCode.retry.succeeded()
+            } else {
+                commandCode.error = failure.localizedDescription
+                commandCode.notConnected = false
+                if failure.isAuthentication {
+                    // Command Code owns auth.json; `cmd login` can fix it while we run.
+                    commandCode.retry.awaitingCredential(now: Date(), interval: interval)
+                } else {
+                    commandCode.retry.failed(isTransient: failure.isTransient, now: Date(), interval: interval)
+                }
+            }
+        } catch {
+            guard version == generation, settings.commandCode == configuration else { return }
+            commandCode.error = error.localizedDescription
+            commandCode.notConnected = false
+            commandCode.retry.awaitingCredential(now: Date(), interval: interval)
+        }
+        onChange?()
     }
     private func verifyIsolation() {
         let snapshots = settings.accounts.compactMap { account in
@@ -283,17 +364,30 @@ final class UsageMonitor {
     private func schedule() {
         timer?.invalidate(); timer = nil
         guard online, !sleeping, !isBusy else { return }
-        let dates = settings.accounts.map { account -> Date in
+        var allDates = settings.accounts.map { account -> Date in
             let state = states[account.slot]!
             if state.error != nil { return state.retry.nextAttempt ?? .distantFuture }
-            let poll = state.snapshot?.fetchedAt.addingTimeInterval(interval) ?? Date().addingTimeInterval(interval)
-            if account.autoStart {
-                let auto = state.autoCheckedAt?.addingTimeInterval(WindowInitializer.interval) ?? Date()
-                return min(poll, auto)
-            }
-            return poll
+            return state.snapshot?.fetchedAt.addingTimeInterval(interval) ?? Date().addingTimeInterval(interval)
         }
-        guard let date = dates.min(), date != .distantFuture else { return }
+        if settings.commandCode.enabled {
+            if commandCode.error != nil {
+                allDates.append(commandCode.retry.nextAttempt ?? .distantFuture)
+            } else if commandCode.notConnected {
+                allDates.append(Date().addingTimeInterval(interval))
+            } else {
+                allDates.append(commandCode.snapshot?.fetchedAt.addingTimeInterval(interval) ?? Date())
+            }
+        }
+        if settings.claudeCode.enabled {
+            if claudeCode.error != nil {
+                allDates.append(claudeCode.retry.nextAttempt ?? .distantFuture)
+            } else if claudeCode.notConnected {
+                allDates.append(Date().addingTimeInterval(interval))
+            } else {
+                allDates.append(claudeCode.snapshot?.fetchedAt.addingTimeInterval(interval) ?? Date())
+            }
+        }
+        guard let date = allDates.min(), date != .distantFuture else { return }
         let timer = Timer(timeInterval: max(1, date.timeIntervalSinceNow), repeats: false) { [weak self] _ in
             Task { @MainActor in self?.refresh(manual: false) }
         }
@@ -303,6 +397,8 @@ final class UsageMonitor {
     func stop() {
         timer?.invalidate(); network.cancel()
         CodexClient.cancelAll()
+        CommandCodeClient.cancelAll()
+        ClaudeCodeClient.cancelAll()
         for observer in observers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
     }
 }
