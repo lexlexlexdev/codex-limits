@@ -200,9 +200,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
                       claudeView.frame.height > 40 else {
                     fputs("UI smoke: Claude Code card is missing or has collapsed layout\n", stderr); exit(1)
                 }
-                guard let preview = findViews(in: controller.view).compactMap({ $0 as? MenuBarPreviewView }).first,
-                      preview.frame.width >= 300, !monitor.menuBarTitle().title.isEmpty else {
-                    fputs("UI smoke: menu bar preview is missing or empty\n", stderr); exit(1)
+                guard findViews(in: controller.view).compactMap({ $0 as? MenuBarPreviewView }).isEmpty else {
+                    fputs("UI smoke: the popover must not show the menu bar preview\n", stderr); exit(1)
                 }
                 writeSnapshot(claudeView, flag: "--ui-claude-snapshot")
                 writeSnapshot(controller.view, flag: "--ui-snapshot")

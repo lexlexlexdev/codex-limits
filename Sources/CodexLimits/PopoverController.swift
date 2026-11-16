@@ -66,7 +66,6 @@ final class PopoverController: NSViewController {
             }
         }
         let content = UI.stack([UI.label(summary, size: 11, color: .secondaryLabelColor), UI.divider()], spacing: 10)
-        content.addArrangedSubview(MenuBarPreviewView(title: monitor.menuBarTitle().title))
         if monitor.settings.accounts.isEmpty {
             content.addArrangedSubview(UI.label("No Codex accounts configured. Use Settings → Add Account.", color: .secondaryLabelColor))
         }
