@@ -245,7 +245,7 @@ public final class ClaudeCodeClient: @unchecked Sendable {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("CodexLimits/1.5", forHTTPHeaderField: "User-Agent")
+        request.setValue("CodexLimits/1.6", forHTTPHeaderField: "User-Agent")
 
         let data: Data
         let response: URLResponse
